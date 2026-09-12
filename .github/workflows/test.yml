@@ -1,0 +1,39 @@
+name: test
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  test:
+    name: cargo test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Plain `cargo test` rather than nextest: nextest does not run doctests,
+      # and trybuild's compile-fail cases need the normal harness.
+      - name: Run tests
+        run: cargo test --workspace --all-features --all-targets
+
+      # --all-targets skips doctests, so run them separately.
+      - name: Run doctests
+        run: cargo test --workspace --all-features --doc

@@ -1,0 +1,33 @@
+name: clippy
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+
+concurrency:
+  group: clippy-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  clippy:
+    name: cargo clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The deny-list lives in [workspace.lints.clippy] in the root Cargo.toml.
+      # `-D warnings` additionally fails the build on anything warn-level that
+      # the workspace config has not already escalated.
+      - name: Run clippy
+        run: cargo clippy --workspace --all-features --all-targets -- -D warnings

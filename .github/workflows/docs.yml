@@ -1,0 +1,31 @@
+name: docs
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Broken intra-doc links are warnings by default; a docs.rs build failure is
+  # permanent for a published version, so fail here instead.
+  RUSTDOCFLAGS: -D warnings
+
+jobs:
+  docs:
+    name: cargo doc
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build documentation
+        run: cargo doc --workspace --all-features --no-deps --document-private-items

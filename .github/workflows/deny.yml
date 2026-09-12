@@ -1,0 +1,30 @@
+name: deny
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+  # Advisories change without the code changing, so also run on a schedule.
+  schedule:
+    - cron: "0 6 * * 1"
+
+concurrency:
+  group: deny-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deny:
+    name: cargo deny (${{ matrix.check }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Split so an advisory failure is distinguishable at a glance from a
+        # license or dependency-source failure.
+        check: [advisories, bans, licenses, sources]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check ${{ matrix.check }}

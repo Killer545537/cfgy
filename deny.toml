@@ -1,0 +1,48 @@
+# Configuration for cargo-deny: https://embarkstudios.github.io/cargo-deny/
+#
+# Checked in CI by .github/workflows/deny.yml. Run locally with:
+#   cargo install --locked cargo-deny && cargo deny check
+
+[graph]
+# Every format adapter is feature-gated, so the default feature set hides most
+# of the dependency tree. Audit all of it.
+all-features = true
+
+[advisories]
+# Fail on any dependency with a filed RustSec advisory.
+yanked = "deny"
+ignore = []
+
+[licenses]
+# Permissive licenses only. Anything not listed here fails the build and is a
+# deliberate decision to make, not a default to inherit.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+]
+confidence-threshold = 0.9
+# The dependency tree is still empty; do not warn about allowances nothing uses.
+unused-allowed-license = "allow"
+
+# Workspace members declare MIT and pass on their own; this only matters for
+# any future member marked `publish = false`.
+[licenses.private]
+ignore = true
+
+[bans]
+# Duplicate versions are a warning, not an error: a transitive dependency
+# pulling in two majors of the same crate is common and often not actionable.
+multiple-versions = "warn"
+wildcards = "deny"
+deny = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
