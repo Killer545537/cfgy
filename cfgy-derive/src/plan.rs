@@ -1,8 +1,12 @@
 //! Front end of the derive: turns a [`DeriveInput`] into a [`StructPlan`].
 
 use proc_macro2::Span;
+use syn::ext::IdentExt;
 use syn::meta::ParseNestedMeta;
-use syn::{Attribute, Data, DeriveInput, Error, Expr, Fields, Generics, Ident, LitBool, LitStr, Type};
+use syn::{
+    Attribute, Data, DeriveInput, Error, Expr, Fields, GenericArgument, Generics, Ident, LitBool, LitStr,
+    PathArguments, Type,
+};
 
 /// Everything codegen needs to know about a derived struct.
 pub struct StructPlan {
@@ -32,6 +36,13 @@ pub struct FieldPlan {
     pub default: Option<Expr>,
 }
 
+impl FieldPlan {
+    /// A key absent from the config is an error only for required fields.
+    pub const fn required(&self) -> bool {
+        self.optional.is_none() && self.default.is_none()
+    }
+}
+
 /// Builds the plan for `input`, rejecting shapes the derive does not support.
 pub fn build(input: &DeriveInput) -> syn::Result<StructPlan> {
     let fields = match &input.data {
@@ -59,21 +70,25 @@ pub fn build(input: &DeriveInput) -> syn::Result<StructPlan> {
     let mut errors = Vec::new();
     let source = source_plan(parse_options(&input.attrs, Site::Struct, &mut errors), &mut errors);
 
-    let fields = fields
-        .iter()
-        .filter_map(|field| {
-            let ident = field.ident.clone()?;
-            let options = parse_options(&field.attrs, Site::Field, &mut errors);
-            Some(FieldPlan {
-                key: ident.to_string(),
-                key_span: ident.span(),
-                ident,
-                ty: field.ty.clone(),
-                optional: None,
-                default: options.default,
-            })
-        })
-        .collect();
+    let mut plans: Vec<FieldPlan> = Vec::with_capacity(fields.len());
+    for field in fields {
+        let Some(ident) = field.ident.clone() else { continue };
+        let options = parse_options(&field.attrs, Site::Field, &mut errors);
+        let (key, key_span) = options
+            .rename
+            .map_or_else(|| (ident.unraw().to_string(), ident.span()), |rename| (rename.value(), rename.span()));
+        if plans.iter().any(|plan| plan.key == key) {
+            errors.push(Error::new(key_span, format!("duplicate config key `{key}`")));
+        }
+        plans.push(FieldPlan {
+            ident,
+            key,
+            key_span,
+            ty: field.ty.clone(),
+            optional: option_inner(&field.ty).cloned(),
+            default: options.default,
+        });
+    }
 
     if let Some(error) = errors.into_iter().reduce(|mut acc, error| {
         acc.combine(error);
@@ -82,7 +97,7 @@ pub fn build(input: &DeriveInput) -> syn::Result<StructPlan> {
         return Err(error);
     }
 
-    Ok(StructPlan { ident: input.ident.clone(), generics: input.generics.clone(), source, fields })
+    Ok(StructPlan { ident: input.ident.clone(), generics: input.generics.clone(), source, fields: plans })
 }
 
 /// Where a `#[config(...)]` attribute is written.
@@ -162,6 +177,27 @@ fn source_plan(options: Options, errors: &mut Vec<Error>) -> Option<SourcePlan> 
         format: options.format.map(|(_, format)| format),
         check: options.check.is_none_or(|(_, check)| check.value),
     })
+}
+
+/// Returns `T` if `ty` is syntactically `Option<T>`, `std::option::Option<T>` or `core::option::Option<T>`.
+fn option_inner(ty: &Type) -> Option<&Type> {
+    let path = match ty {
+        Type::Group(group) => return option_inner(&group.elem),
+        Type::Path(type_path) if type_path.qself.is_none() => &type_path.path,
+        _ => return None,
+    };
+    let idents: Vec<String> = path.segments.iter().map(|segment| segment.ident.to_string()).collect();
+    let idents: Vec<&str> = idents.iter().map(String::as_str).collect();
+    let prefix_is_bare = path.segments.iter().rev().skip(1).all(|segment| segment.arguments.is_none());
+    if !prefix_is_bare || !matches!(idents.as_slice(), ["Option"] | ["std" | "core", "option", "Option"]) {
+        return None;
+    }
+    let PathArguments::AngleBracketed(generics) = &path.segments.last()?.arguments else { return None };
+    let mut args = generics.args.iter();
+    match (args.next(), args.next()) {
+        (Some(GenericArgument::Type(inner)), None) => Some(inner),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -300,6 +336,83 @@ mod tests {
         assert!(errors.iter().any(|e| e.contains("`bogus`")), "{errors:?}");
         assert!(errors.iter().any(|e| e.contains("struct-level option")), "{errors:?}");
         assert!(errors.iter().any(|e| e.contains("`other`")), "{errors:?}");
+    }
+
+    fn field<'a>(plan: &'a StructPlan, name: &str) -> &'a FieldPlan {
+        plan.fields.iter().find(|f| f.ident == name).unwrap()
+    }
+
+    #[test]
+    fn rename_sets_key() {
+        let plan = build(&parse_quote! {
+            struct S {
+                #[config(rename = "listen-port")]
+                port: u16,
+            }
+        })
+        .unwrap();
+        assert_eq!(field(&plan, "port").key, "listen-port");
+    }
+
+    #[test]
+    fn raw_ident_key_is_unraw() {
+        let plan = build(&parse_quote! { struct S { r#type: String } }).unwrap();
+        let ty = &plan.fields[0];
+        assert_eq!(ty.ident, "r#type");
+        assert_eq!(ty.key, "type");
+    }
+
+    #[test]
+    fn rejects_duplicate_key_after_rename() {
+        let msg = error(&parse_quote! {
+            struct S {
+                port: u16,
+                #[config(rename = "port")]
+                other: u16,
+            }
+        });
+        assert_eq!(msg, "duplicate config key `port`");
+    }
+
+    #[test]
+    fn peels_option() {
+        let plan = build(&parse_quote! {
+            struct S {
+                a: Option<u8>,
+                b: std::option::Option<u8>,
+                c: ::core::option::Option<u8>,
+                d: Option<Vec<u8>>,
+                e: Vec<Option<u8>>,
+                f: u8,
+                g: foo::Option<u8>,
+            }
+        })
+        .unwrap();
+        let u8_ty: Type = parse_quote!(u8);
+        let vec_ty: Type = parse_quote!(Vec<u8>);
+        assert_eq!(field(&plan, "a").optional.as_ref(), Some(&u8_ty));
+        assert_eq!(field(&plan, "b").optional.as_ref(), Some(&u8_ty));
+        assert_eq!(field(&plan, "c").optional.as_ref(), Some(&u8_ty));
+        assert_eq!(field(&plan, "d").optional.as_ref(), Some(&vec_ty));
+        assert!(field(&plan, "e").optional.is_none());
+        assert!(field(&plan, "f").optional.is_none());
+        assert!(field(&plan, "g").optional.is_none());
+    }
+
+    #[test]
+    fn required_only_without_option_or_default() {
+        let plan = build(&parse_quote! {
+            struct S {
+                a: u8,
+                b: Option<u8>,
+                #[config(default = 1)]
+                c: u8,
+            }
+        })
+        .unwrap();
+        assert!(field(&plan, "a").required());
+        assert!(!field(&plan, "b").required());
+        assert!(!field(&plan, "c").required());
     }
 
     #[test]
