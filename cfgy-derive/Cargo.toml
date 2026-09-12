@@ -12,7 +12,20 @@ categories = ["config", "development-tools::procedural-macro-helpers"]
 [lib]
 proc-macro = true
 
+[features]
+toml = ["cfgy-formats/toml"]
+json = ["cfgy-formats/json"]
+yaml = ["cfgy-formats/yaml"]
+
 [dependencies]
+cfgy-core.workspace = true
+cfgy-formats.workspace = true
+syn.workspace = true
+quote.workspace = true
+proc-macro2.workspace = true
+
+[dev-dependencies]
+prettyplease.workspace = true
 
 [lints]
 workspace = true

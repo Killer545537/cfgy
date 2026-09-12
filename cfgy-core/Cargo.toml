@@ -10,6 +10,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+indexmap.workspace = true
 
 [lints]
 workspace = true

@@ -9,7 +9,20 @@ repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[features]
+toml = ["dep:toml"]
+json = ["dep:serde_json"]
+yaml = ["dep:saphyr"]
+
 [dependencies]
+cfgy-core.workspace = true
+indexmap.workspace = true
+toml = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+saphyr = { workspace = true, optional = true }
+
+[dev-dependencies]
+proptest.workspace = true
 
 [lints]
 workspace = true

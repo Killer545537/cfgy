@@ -12,7 +12,19 @@ readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[features]
+default = ["toml"]
+toml = ["cfgy-formats/toml", "cfgy-derive/toml"]
+json = ["cfgy-formats/json", "cfgy-derive/json"]
+yaml = ["cfgy-formats/yaml", "cfgy-derive/yaml"]
+
 [dependencies]
+cfgy-core.workspace = true
+cfgy-formats.workspace = true
+cfgy-derive.workspace = true
+
+[dev-dependencies]
+trybuild.workspace = true
 
 [lints]
 workspace = true
