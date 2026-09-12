@@ -3,6 +3,7 @@ name = "cfgy-derive"
 description = "Proc-macro implementation of cfgy's `FromConfig` derive. Re-exported by `cfgy`; do not depend on this directly."
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 keywords.workspace = true

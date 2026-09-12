@@ -3,6 +3,7 @@ name = "cfgy"
 description = "Derive config structs from TOML, JSON, or YAML files, with the file checked at compile time and parsed at runtime."
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 homepage.workspace = true

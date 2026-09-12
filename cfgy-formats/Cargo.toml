@@ -3,6 +3,7 @@ name = "cfgy-formats"
 description = "Feature-gated TOML, JSON, and YAML adapters that lower source text into the cfgy value IR."
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 keywords.workspace = true

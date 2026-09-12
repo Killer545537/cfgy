@@ -6,6 +6,7 @@ members = ["cfgy-core", "cfgy-derive", "cfgy-formats", "cfgy"]
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
+license = "MIT"
 repository = "https://github.com/Killer545537/cfgy"
 homepage = "https://github.com/Killer545537/cfgy"
 documentation = "https://docs.rs/cfgy"
