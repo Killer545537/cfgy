@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use crate::{ConfigError, PathStack, Value};
 
 /// Conversion from the value IR into a Rust type.
@@ -25,6 +27,72 @@ macro_rules! impl_int {
 
 impl_int!(i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize);
 
+// ponytail: integers widen into floats only through a lossless `From` (i32 for f64, i16 for f32); larger ones are
+// rejected as out of range rather than silently rounded. Write `1.0e10` for big float literals.
+impl FromValue for f64 {
+    fn from_value(value: &Value, path: &mut PathStack) -> Result<Self, ConfigError> {
+        match value {
+            Value::Float(f) => Ok(*f),
+            Value::Int(i) => i32::try_from(*i).map(Self::from).map_err(|_| ConfigError::out_of_range(path, *i, "f64")),
+            _ => Err(ConfigError::type_mismatch(path, "f64", value)),
+        }
+    }
+}
+
+impl FromValue for f32 {
+    fn from_value(value: &Value, path: &mut PathStack) -> Result<Self, ConfigError> {
+        match value {
+            // `as` is banned and std has no checked f64 -> f32, so go through the shortest round-trip decimal, which
+            // parses to the nearest f32. A finite value too large for f32 would become infinite, so it is rejected.
+            Value::Float(f) => match f.to_string().parse::<Self>() {
+                Ok(narrowed) if narrowed.is_finite() || !f.is_finite() => Ok(narrowed),
+                _ => Err(ConfigError::type_mismatch(path, "f32", value)),
+            },
+            Value::Int(i) => i16::try_from(*i).map(Self::from).map_err(|_| ConfigError::out_of_range(path, *i, "f32")),
+            _ => Err(ConfigError::type_mismatch(path, "f32", value)),
+        }
+    }
+}
+
+impl FromValue for bool {
+    fn from_value(value: &Value, path: &mut PathStack) -> Result<Self, ConfigError> {
+        match value {
+            Value::Bool(b) => Ok(*b),
+            _ => Err(ConfigError::type_mismatch(path, "bool", value)),
+        }
+    }
+}
+
+impl FromValue for String {
+    fn from_value(value: &Value, path: &mut PathStack) -> Result<Self, ConfigError> {
+        match value {
+            Value::Str(s) => Ok(s.clone()),
+            _ => Err(ConfigError::type_mismatch(path, "string", value)),
+        }
+    }
+}
+
+impl FromValue for PathBuf {
+    fn from_value(value: &Value, path: &mut PathStack) -> Result<Self, ConfigError> {
+        match value {
+            Value::Str(s) => Ok(Self::from(s)),
+            _ => Err(ConfigError::type_mismatch(path, "path", value)),
+        }
+    }
+}
+
+impl FromValue for char {
+    fn from_value(value: &Value, path: &mut PathStack) -> Result<Self, ConfigError> {
+        if let Value::Str(s) = value {
+            let mut chars = s.chars();
+            if let (Some(c), None) = (chars.next(), chars.next()) {
+                return Ok(c);
+            }
+        }
+        Err(ConfigError::type_mismatch(path, "a single character", value))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -44,5 +112,35 @@ mod tests {
             Err(ConfigError::Type { expected: "i32", found: "float", .. })
         ));
         assert!(matches!(conv::<i32>(&Value::Str("1".into())), Err(ConfigError::Type { found: "string", .. })));
+    }
+
+    #[test]
+    fn floats() {
+        assert!((conv::<f64>(&Value::Float(1.5)).unwrap() - 1.5).abs() < f64::EPSILON);
+        assert!((conv::<f64>(&Value::Int(-3)).unwrap() + 3.0).abs() < f64::EPSILON);
+        assert!(matches!(conv::<f64>(&Value::Int(i64::MAX)), Err(ConfigError::OutOfRange { target: "f64", .. })));
+        assert!(matches!(conv::<f64>(&Value::Str("1.0".into())), Err(ConfigError::Type { found: "string", .. })));
+        assert!((conv::<f32>(&Value::Float(0.1)).unwrap() - 0.1).abs() < f32::EPSILON);
+        assert!((conv::<f32>(&Value::Int(7)).unwrap() - 7.0).abs() < f32::EPSILON);
+        assert!(conv::<f32>(&Value::Float(f64::INFINITY)).unwrap().is_infinite());
+        assert!(matches!(conv::<f32>(&Value::Float(1.0e300)), Err(ConfigError::Type { expected: "f32", .. })));
+        assert!(matches!(conv::<f32>(&Value::Int(40_000)), Err(ConfigError::OutOfRange { target: "f32", .. })));
+    }
+
+    #[test]
+    fn scalars() {
+        assert!(conv::<bool>(&Value::Bool(true)).unwrap());
+        assert!(matches!(
+            conv::<bool>(&Value::Int(1)),
+            Err(ConfigError::Type { expected: "bool", found: "integer", .. })
+        ));
+        assert_eq!(conv::<String>(&Value::Str("hi".into())).unwrap(), "hi");
+        assert!(matches!(conv::<String>(&Value::Int(1)), Err(ConfigError::Type { found: "integer", .. })));
+        assert_eq!(conv::<PathBuf>(&Value::Str("a/b".into())).unwrap(), PathBuf::from("a/b"));
+        assert!(matches!(conv::<PathBuf>(&Value::Bool(false)), Err(ConfigError::Type { found: "bool", .. })));
+        assert_eq!(conv::<char>(&Value::Str("é".into())).unwrap(), 'é');
+        assert!(conv::<char>(&Value::Str("ab".into())).is_err());
+        assert!(conv::<char>(&Value::Str(String::new())).is_err());
+        assert!(conv::<char>(&Value::Int(97)).is_err());
     }
 }
