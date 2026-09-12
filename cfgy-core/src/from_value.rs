@@ -196,6 +196,15 @@ impl FromValue for Datetime {
     }
 }
 
+impl<T: FromValue> FromValue for Option<T> {
+    fn from_value(value: &Value, path: &mut PathStack) -> Result<Self, ConfigError> {
+        match value {
+            Value::Null => Ok(None),
+            _ => T::from_value(value, path).map(Some),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -305,5 +314,27 @@ mod tests {
         assert_eq!(conv::<Datetime>(&Value::Datetime(Datetime(stamp.into()))).unwrap(), Datetime(stamp.into()));
         assert_eq!(conv::<Datetime>(&Value::Str(stamp.into())).unwrap(), Datetime(stamp.into()));
         assert!(matches!(conv::<Datetime>(&Value::Int(0)), Err(ConfigError::Type { expected: "datetime", .. })));
+    }
+
+    #[test]
+    fn options() {
+        let items = Value::Seq(vec![Value::Int(1), Value::Null, Value::Int(3)]);
+        assert_eq!(conv::<Vec<Option<u8>>>(&items).unwrap(), [Some(1), None, Some(3)]);
+        assert!(matches!(conv::<Option<u8>>(&Value::Str("x".into())), Err(ConfigError::Type { expected: "u8", .. })));
+    }
+
+    #[test]
+    fn deep_error_path() {
+        let table = |key: &str, value: Value| Value::Map(IndexMap::from([(key.to_owned(), value)]));
+        let replicas = Value::Seq(vec![
+            table("port", Value::Int(5432)),
+            table("port", Value::Int(5433)),
+            table("port", Value::Int(70_000)),
+        ]);
+        let doc = table("database", table("replicas", replicas));
+
+        let err = conv::<HashMap<String, HashMap<String, Vec<HashMap<String, u16>>>>>(&doc).unwrap_err();
+        assert!(matches!(err, ConfigError::OutOfRange { ref path, .. } if path == "database.replicas[2].port"));
+        assert_eq!(err.to_string(), "`database.replicas[2].port`: 70000 is out of range for u16");
     }
 }
