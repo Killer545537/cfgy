@@ -10,11 +10,15 @@ use cfgy_core::Format;
 mod json;
 #[cfg(feature = "toml")]
 mod toml;
+#[cfg(feature = "yaml")]
+mod yaml;
 
 #[cfg(feature = "json")]
 pub use self::json::Json;
 #[cfg(feature = "toml")]
 pub use self::toml::Toml;
+#[cfg(feature = "yaml")]
+pub use self::yaml::Yaml;
 
 /// No format could be chosen for a file.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,6 +79,8 @@ fn enabled(feature: &'static str) -> Result<&'static dyn Format, SelectError> {
         "toml" => Ok(&Toml),
         #[cfg(feature = "json")]
         "json" => Ok(&Json),
+        #[cfg(feature = "yaml")]
+        "yaml" => Ok(&Yaml),
         _ => Err(error(format!("the {feature} format is disabled, enable the `{feature}` cargo feature"))),
     }
 }
@@ -125,6 +131,22 @@ mod tests {
     fn selects_json() {
         assert_eq!(select(Some("json"), Path::new("app.toml"), "").map(Format::name), Ok("json"));
         assert_eq!(select(None, Path::new("app"), " {}").map(Format::name), Ok("json"));
+    }
+
+    #[test]
+    #[cfg(feature = "yaml")]
+    fn selects_yaml() {
+        assert_eq!(select(None, Path::new("app.yml"), "").map(Format::name), Ok("yaml"));
+        assert_eq!(
+            select(
+                None,
+                Path::new("app"),
+                "---
+a: 1"
+            )
+            .map(Format::name),
+            Ok("yaml")
+        );
     }
 
     #[test]
