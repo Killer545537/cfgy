@@ -2,11 +2,13 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
     hash::{BuildHasher, Hash},
     path::PathBuf,
+    rc::Rc,
+    sync::Arc,
 };
 
 use indexmap::IndexMap;
 
-use crate::{ConfigError, PathStack, Value};
+use crate::{ConfigError, Datetime, PathStack, Value};
 
 /// Conversion from the value IR into a Rust type.
 ///
@@ -151,6 +153,49 @@ impl<T: FromValue, S: BuildHasher + Default> FromValue for IndexMap<String, T, S
     }
 }
 
+macro_rules! impl_tuple {
+    ($len:literal => $(($t:ident $item:ident $i:literal)),+) => {
+        impl<$($t: FromValue),+> FromValue for ($($t,)+) {
+            fn from_value(value: &Value, path: &mut PathStack) -> Result<Self, ConfigError> {
+                let Value::Seq(items) = value else {
+                    return Err(ConfigError::type_mismatch(path, "sequence", value));
+                };
+                let [$($item),+] = items.as_slice() else {
+                    return Err(ConfigError::length(path, $len, items.len()));
+                };
+                Ok(($(path.with_index($i, |p| $t::from_value($item, p))?,)+))
+            }
+        }
+    };
+}
+
+impl_tuple!(1 => (A a 0));
+impl_tuple!(2 => (A a 0), (B b 1));
+impl_tuple!(3 => (A a 0), (B b 1), (C c 2));
+impl_tuple!(4 => (A a 0), (B b 1), (C c 2), (D d 3));
+
+macro_rules! impl_pointer {
+    ($($p:ident),*) => {$(
+        impl<T: FromValue> FromValue for $p<T> {
+            fn from_value(value: &Value, path: &mut PathStack) -> Result<Self, ConfigError> {
+                T::from_value(value, path).map(Self::new)
+            }
+        }
+    )*};
+}
+
+impl_pointer!(Box, Rc, Arc);
+
+impl FromValue for Datetime {
+    fn from_value(value: &Value, path: &mut PathStack) -> Result<Self, ConfigError> {
+        match value {
+            Value::Datetime(d) => Ok(d.clone()),
+            Value::Str(s) => Ok(Self(s.clone())),
+            _ => Err(ConfigError::type_mismatch(path, "datetime", value)),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,5 +279,31 @@ mod tests {
         let bad = Value::Map(IndexMap::from([("port".to_owned(), Value::Int(-1))]));
         let err = conv::<HashMap<String, u8>>(&bad).unwrap_err();
         assert!(matches!(err, ConfigError::OutOfRange { ref path, .. } if path == "port"));
+    }
+
+    #[test]
+    fn tuples() {
+        let pair = Value::Seq(vec![Value::Str("a".into()), Value::Int(1)]);
+        assert_eq!(conv::<(String, u8)>(&pair).unwrap(), ("a".to_owned(), 1));
+        assert_eq!(conv::<(u8,)>(&Value::Seq(vec![Value::Int(9)])).unwrap(), (9,));
+        let four = Value::Seq(vec![Value::Int(1), Value::Bool(true), Value::Float(0.5), Value::Str("x".into())]);
+        assert_eq!(conv::<(u8, bool, f64, char)>(&four).unwrap(), (1, true, 0.5, 'x'));
+        assert!(matches!(conv::<(u8, u8, u8)>(&pair), Err(ConfigError::Length { expected: 3, found: 2, .. })));
+        assert!(matches!(conv::<(u8,)>(&Value::Int(1)), Err(ConfigError::Type { expected: "sequence", .. })));
+        let err = conv::<(String, String)>(&pair).unwrap_err();
+        assert!(matches!(err, ConfigError::Type { ref path, .. } if path == "[1]"));
+    }
+
+    #[test]
+    fn pointers_and_datetime() {
+        assert_eq!(*conv::<Box<u8>>(&Value::Int(1)).unwrap(), 1);
+        assert_eq!(*conv::<Rc<String>>(&Value::Str("s".into())).unwrap(), "s");
+        assert_eq!(*conv::<Arc<Vec<bool>>>(&Value::Seq(vec![Value::Bool(false)])).unwrap(), [false]);
+        assert!(conv::<Box<u8>>(&Value::Null).is_err());
+
+        let stamp = "1979-05-27T07:32:00Z";
+        assert_eq!(conv::<Datetime>(&Value::Datetime(Datetime(stamp.into()))).unwrap(), Datetime(stamp.into()));
+        assert_eq!(conv::<Datetime>(&Value::Str(stamp.into())).unwrap(), Datetime(stamp.into()));
+        assert!(matches!(conv::<Datetime>(&Value::Int(0)), Err(ConfigError::Type { expected: "datetime", .. })));
     }
 }
