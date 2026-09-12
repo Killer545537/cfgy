@@ -1,4 +1,8 @@
-use std::path::PathBuf;
+use std::{
+    collections::{HashSet, VecDeque},
+    hash::{BuildHasher, Hash},
+    path::PathBuf,
+};
 
 use crate::{ConfigError, PathStack, Value};
 
@@ -93,6 +97,32 @@ impl FromValue for char {
     }
 }
 
+/// Converts every item of a `Seq`, pushing its index onto `path`.
+fn seq<T: FromValue, C: FromIterator<T>>(value: &Value, path: &mut PathStack) -> Result<C, ConfigError> {
+    let Value::Seq(items) = value else {
+        return Err(ConfigError::type_mismatch(path, "sequence", value));
+    };
+    items.iter().enumerate().map(|(i, item)| path.with_index(i, |p| T::from_value(item, p))).collect()
+}
+
+impl<T: FromValue> FromValue for Vec<T> {
+    fn from_value(value: &Value, path: &mut PathStack) -> Result<Self, ConfigError> {
+        seq(value, path)
+    }
+}
+
+impl<T: FromValue> FromValue for VecDeque<T> {
+    fn from_value(value: &Value, path: &mut PathStack) -> Result<Self, ConfigError> {
+        seq(value, path)
+    }
+}
+
+impl<T: FromValue + Eq + Hash, S: BuildHasher + Default> FromValue for HashSet<T, S> {
+    fn from_value(value: &Value, path: &mut PathStack) -> Result<Self, ConfigError> {
+        seq(value, path)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -142,5 +172,21 @@ mod tests {
         assert!(conv::<char>(&Value::Str("ab".into())).is_err());
         assert!(conv::<char>(&Value::Str(String::new())).is_err());
         assert!(conv::<char>(&Value::Int(97)).is_err());
+    }
+
+    #[test]
+    fn sequences() {
+        let ints = Value::Seq(vec![Value::Int(1), Value::Int(2), Value::Int(1)]);
+        assert_eq!(conv::<Vec<u8>>(&ints).unwrap(), [1, 2, 1]);
+        assert_eq!(conv::<VecDeque<u8>>(&ints).unwrap(), [1, 2, 1]);
+        assert_eq!(conv::<HashSet<u8>>(&ints).unwrap(), HashSet::from([1, 2]));
+        assert_eq!(conv::<Vec<u8>>(&Value::Seq(vec![])).unwrap(), Vec::<u8>::new());
+        assert!(matches!(conv::<Vec<u8>>(&Value::Int(1)), Err(ConfigError::Type { expected: "sequence", .. })));
+
+        let bad = Value::Seq(vec![Value::Int(1), Value::Str("x".into())]);
+        let mut path = PathStack::new();
+        let err = path.with_key("ports", |p| Vec::<u8>::from_value(&bad, p)).unwrap_err();
+        assert!(matches!(err, ConfigError::Type { ref path, .. } if path == "ports[1]"));
+        assert_eq!(path, PathStack::new());
     }
 }
