@@ -1,8 +1,10 @@
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     hash::{BuildHasher, Hash},
     path::PathBuf,
 };
+
+use indexmap::IndexMap;
 
 use crate::{ConfigError, PathStack, Value};
 
@@ -123,6 +125,32 @@ impl<T: FromValue + Eq + Hash, S: BuildHasher + Default> FromValue for HashSet<T
     }
 }
 
+/// Converts every entry of a `Map`, pushing its key onto `path`.
+fn map<T: FromValue, C: FromIterator<(String, T)>>(value: &Value, path: &mut PathStack) -> Result<C, ConfigError> {
+    let Value::Map(entries) = value else {
+        return Err(ConfigError::type_mismatch(path, "table", value));
+    };
+    entries.iter().map(|(key, item)| Ok((key.clone(), path.with_key(key, |p| T::from_value(item, p))?))).collect()
+}
+
+impl<T: FromValue, S: BuildHasher + Default> FromValue for HashMap<String, T, S> {
+    fn from_value(value: &Value, path: &mut PathStack) -> Result<Self, ConfigError> {
+        map(value, path)
+    }
+}
+
+impl<T: FromValue> FromValue for BTreeMap<String, T> {
+    fn from_value(value: &Value, path: &mut PathStack) -> Result<Self, ConfigError> {
+        map(value, path)
+    }
+}
+
+impl<T: FromValue, S: BuildHasher + Default> FromValue for IndexMap<String, T, S> {
+    fn from_value(value: &Value, path: &mut PathStack) -> Result<Self, ConfigError> {
+        map(value, path)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -188,5 +216,23 @@ mod tests {
         let err = path.with_key("ports", |p| Vec::<u8>::from_value(&bad, p)).unwrap_err();
         assert!(matches!(err, ConfigError::Type { ref path, .. } if path == "ports[1]"));
         assert_eq!(path, PathStack::new());
+    }
+
+    #[test]
+    fn maps() {
+        let table = Value::Map(IndexMap::from([("b".to_owned(), Value::Int(2)), ("a".to_owned(), Value::Int(1))]));
+        let expected = [("b".to_owned(), 2), ("a".to_owned(), 1)];
+        assert_eq!(conv::<HashMap<String, u8>>(&table).unwrap(), HashMap::from(expected.clone()));
+        assert_eq!(conv::<BTreeMap<String, u8>>(&table).unwrap(), BTreeMap::from(expected.clone()));
+        assert!(conv::<IndexMap<String, u8>>(&table).unwrap().into_iter().eq(expected));
+        assert_eq!(conv::<HashMap<String, u8>>(&Value::Map(IndexMap::new())).unwrap(), HashMap::new());
+        assert!(matches!(
+            conv::<BTreeMap<String, u8>>(&Value::Seq(vec![])),
+            Err(ConfigError::Type { expected: "table", .. })
+        ));
+
+        let bad = Value::Map(IndexMap::from([("port".to_owned(), Value::Int(-1))]));
+        let err = conv::<HashMap<String, u8>>(&bad).unwrap_err();
+        assert!(matches!(err, ConfigError::OutOfRange { ref path, .. } if path == "port"));
     }
 }
