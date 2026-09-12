@@ -17,8 +17,8 @@ yaml = ["dep:saphyr"]
 [dependencies]
 cfgy-core.workspace = true
 indexmap.workspace = true
-toml = { workspace = true, optional = true }
-serde_json = { workspace = true, optional = true }
+toml = { workspace = true, optional = true, features = ["preserve_order"] }
+serde_json = { workspace = true, optional = true, features = ["preserve_order", "float_roundtrip"] }
 saphyr = { workspace = true, optional = true }
 
 [dev-dependencies]
