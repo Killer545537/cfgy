@@ -1,0 +1,30 @@
+# Build artifacts
+/target/
+**/*.rs.bk
+*.pdb
+
+
+# Coverage / profiling
+*.profraw
+*.profdata
+/coverage/
+/tarpaulin-report.*
+
+# trybuild / macrotest scratch output
+/target/tests/
+wip/
+*.pending-snap
+
+# Editors and tooling
+.idea/
+.vscode/
+*.iml
+rust-project.json
+
+# OS noise
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local

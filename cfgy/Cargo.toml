@@ -1,0 +1,17 @@
+[package]
+name = "cfgy"
+description = "Derive config structs from TOML, JSON, or YAML files, with the file checked at compile time and parsed at runtime."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true
