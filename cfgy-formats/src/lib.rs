@@ -6,6 +6,12 @@ use std::{error::Error, fmt, path::Path};
 
 use cfgy_core::Format;
 
+#[cfg(feature = "toml")]
+mod toml;
+
+#[cfg(feature = "toml")]
+pub use self::toml::Toml;
+
 /// No format could be chosen for a file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelectError {
@@ -60,7 +66,11 @@ fn by_name(name: &str) -> Option<&'static str> {
 }
 
 fn enabled(feature: &'static str) -> Result<&'static dyn Format, SelectError> {
-    Err(error(format!("the {feature} format is disabled, enable the `{feature}` cargo feature")))
+    match feature {
+        #[cfg(feature = "toml")]
+        "toml" => Ok(&Toml),
+        _ => Err(error(format!("the {feature} format is disabled, enable the `{feature}` cargo feature"))),
+    }
 }
 
 const fn error(message: String) -> SelectError {
@@ -96,6 +106,12 @@ mod tests {
         assert_eq!(name(None, "config", "  \n{\"a\": 1}"), Ok("json"));
         assert_eq!(name(None, "config", "\n---\na: 1"), Ok("yaml"));
         assert!(name(None, "config", "a = 1").unwrap_err().contains("does not look like"));
+    }
+
+    #[test]
+    #[cfg(feature = "toml")]
+    fn selects_toml() {
+        assert_eq!(select(None, Path::new("app.toml"), "").map(Format::name), Ok("toml"));
     }
 
     #[test]
