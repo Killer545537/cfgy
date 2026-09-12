@@ -6,9 +6,13 @@ use std::{error::Error, fmt, path::Path};
 
 use cfgy_core::Format;
 
+#[cfg(feature = "json")]
+mod json;
 #[cfg(feature = "toml")]
 mod toml;
 
+#[cfg(feature = "json")]
+pub use self::json::Json;
 #[cfg(feature = "toml")]
 pub use self::toml::Toml;
 
@@ -69,6 +73,8 @@ fn enabled(feature: &'static str) -> Result<&'static dyn Format, SelectError> {
     match feature {
         #[cfg(feature = "toml")]
         "toml" => Ok(&Toml),
+        #[cfg(feature = "json")]
+        "json" => Ok(&Json),
         _ => Err(error(format!("the {feature} format is disabled, enable the `{feature}` cargo feature"))),
     }
 }
@@ -112,6 +118,13 @@ mod tests {
     #[cfg(feature = "toml")]
     fn selects_toml() {
         assert_eq!(select(None, Path::new("app.toml"), "").map(Format::name), Ok("toml"));
+    }
+
+    #[test]
+    #[cfg(feature = "json")]
+    fn selects_json() {
+        assert_eq!(select(Some("json"), Path::new("app.toml"), "").map(Format::name), Ok("json"));
+        assert_eq!(select(None, Path::new("app"), " {}").map(Format::name), Ok("json"));
     }
 
     #[test]
