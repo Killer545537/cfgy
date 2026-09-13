@@ -45,6 +45,10 @@ fn copy_fixtures(src: &Path, dst: &Path) -> io::Result<()> {
 fn ui() {
     let target_dir = Path::new(env!("CARGO_TARGET_TMPDIR")).parent().expect("CARGO_TARGET_TMPDIR has a parent");
     let fixtures = target_dir.join("tests/trybuild/cfgy/fixtures");
+    // Start clean: a fixture deleted from the source tree must not linger, or `file_missing` would find it.
+    if let Err(error) = fs::remove_dir_all(&fixtures) {
+        assert_eq!(error.kind(), io::ErrorKind::NotFound, "clear old ui fixtures: {error}");
+    }
     copy_fixtures(&Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/ui"), &fixtures)
         .expect("copy ui fixtures into the trybuild project");
 
