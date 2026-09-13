@@ -245,5 +245,6 @@ pub use cfgy_formats::Yaml;
 /// Items used by generated code. Not public API.
 #[doc(hidden)]
 pub mod __private {
+    pub use cfgy_core::DefaultFrom;
     pub use cfgy_formats::select;
 }
