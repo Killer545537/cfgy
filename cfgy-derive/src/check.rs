@@ -29,7 +29,8 @@ pub fn check_source(manifest_dir: &Path, source: &SourcePlan, fields: &[FieldPla
     let resolved = manifest_dir.join(&file);
     let error = |message: String| syn::Error::new(source.path.span(), message);
 
-    let text = fs::read_to_string(&resolved).map_err(|err| error(format!("config file `{file}` not found: {err}")))?;
+    let text =
+        fs::read_to_string(&resolved).map_err(|err| error(format!("cannot read config file `{file}`: {err}")))?;
     let format = cfgy_formats::select(source.format.as_ref().map(LitStr::value).as_deref(), &resolved, &text)
         .map_err(|err| error(format!("config file `{file}`: {err}")))?;
     let value = format.parse(&text).map_err(|err| match err.line_col(&text) {
@@ -319,7 +320,7 @@ mod tests {
     fn missing_file_fails() {
         let dir = manifest_dir("other.txt", "");
         let err = check_source(&dir, &source("missing.toml"), &[]).unwrap_err().to_string();
-        assert!(err.starts_with("config file `missing.toml` not found: "), "{err}");
+        assert!(err.starts_with("cannot read config file `missing.toml`: "), "{err}");
     }
 
     #[test]

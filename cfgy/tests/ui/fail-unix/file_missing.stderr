@@ -1,4 +1,4 @@
-error: config file `../../../../cfgy/tests/ui/fail-unix/file_missing.toml` not found: No such file or directory (os error 2)
+error: cannot read config file `../../../../cfgy/tests/ui/fail-unix/file_missing.toml`: No such file or directory (os error 2)
  --> tests/ui/fail-unix/file_missing.rs:4:17
   |
 4 | #[config(path = "../../../../cfgy/tests/ui/fail-unix/file_missing.toml")]
