@@ -1,0 +1,5 @@
+error: `path` is a struct-level option and cannot be used on a field
+ --> tests/ui/fail/attr_path_on_field.rs:5:14
+  |
+5 |     #[config(path = "config.toml")]
+  |              ^^^^

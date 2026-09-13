@@ -1,0 +1,5 @@
+error: `format` requires `path`
+ --> tests/ui/fail/attr_format_without_path.rs:4:10
+  |
+4 | #[config(format = "toml")]
+  |          ^^^^^^

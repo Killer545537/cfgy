@@ -1,0 +1,11 @@
+error: `rename` is a field-level option and cannot be used on the struct
+ --> tests/ui/fail/attr_two_bad_attributes.rs:5:10
+  |
+5 | #[config(rename = "settings")]
+  |          ^^^^^^
+
+error: `path` is a struct-level option and cannot be used on a field
+ --> tests/ui/fail/attr_two_bad_attributes.rs:7:14
+  |
+7 |     #[config(path = "config.toml")]
+  |              ^^^^

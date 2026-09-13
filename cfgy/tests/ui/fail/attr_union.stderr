@@ -1,0 +1,5 @@
+error: `FromConfig` can only be derived for structs, not unions
+ --> tests/ui/fail/attr_union.rs:4:1
+  |
+4 | union Bits {
+  | ^^^^^
