@@ -1,0 +1,5 @@
+name = "api"
+
+[database]
+url = "postgres://localhost/app"
+pool = 8
