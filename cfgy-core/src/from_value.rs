@@ -8,7 +8,7 @@ use std::{
 
 use indexmap::IndexMap;
 
-use crate::{ConfigError, Datetime, PathStack, Shape, Value};
+use crate::{ConfigError, Datetime, PathStack, Shape, Value, is_datetime};
 
 /// Conversion from the value IR into a Rust type.
 ///
@@ -214,7 +214,8 @@ impl FromValue for Datetime {
     fn from_value(value: &Value, path: &mut PathStack) -> Result<Self, ConfigError> {
         match value {
             Value::Datetime(d) => Ok(d.clone()),
-            Value::Str(s) => Ok(Self(s.clone())),
+            // JSON and YAML have no datetime type, so text stands in, but only if it is one (toml checks this too).
+            Value::Str(s) if is_datetime(s) => Ok(Self(s.clone())),
             _ => Err(ConfigError::type_mismatch(path, "datetime", value)),
         }
     }
@@ -355,7 +356,13 @@ mod tests {
         let stamp = "1979-05-27T07:32:00Z";
         assert_eq!(conv::<Datetime>(&Value::Datetime(Datetime(stamp.into()))).unwrap(), Datetime(stamp.into()));
         assert_eq!(conv::<Datetime>(&Value::Str(stamp.into())).unwrap(), Datetime(stamp.into()));
+        assert_eq!(conv::<Datetime>(&Value::Str("07:32:00".into())).unwrap(), Datetime("07:32:00".into()));
         assert!(matches!(conv::<Datetime>(&Value::Int(0)), Err(ConfigError::Type { expected: "datetime", .. })));
+        assert!(matches!(
+            conv::<Datetime>(&Value::Str("yesterday".into())),
+            Err(ConfigError::Type { expected: "datetime", found: "string", .. })
+        ));
+        assert!(conv::<Datetime>(&Value::Str("1979-13-27".into())).is_err());
         assert_eq!(conv::<String>(&Value::Datetime(Datetime(stamp.into()))).unwrap(), stamp);
     }
 

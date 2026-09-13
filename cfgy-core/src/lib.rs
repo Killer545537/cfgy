@@ -15,4 +15,4 @@ pub use from_value::FromValue;
 pub use indexmap::IndexMap;
 pub use path::{PathStack, Segment};
 pub use shape::{Field, Repr, Shape, Variant};
-pub use value::{Datetime, Value};
+pub use value::{Datetime, Value, is_datetime};
