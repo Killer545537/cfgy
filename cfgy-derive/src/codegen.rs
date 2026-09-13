@@ -4,7 +4,7 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::{LitStr, Type};
 
-use crate::plan::{FieldPlan, SourcePlan, StructPlan};
+use crate::plan::{FieldDefault, FieldPlan, SourcePlan, StructPlan};
 
 /// Emits the `FromValue` impl for `plan`, plus the loading methods when it has a `path`.
 pub fn expand(plan: &StructPlan) -> TokenStream2 {
@@ -127,7 +127,9 @@ fn field_init(field: &FieldPlan) -> TokenStream2 {
     );
     // A default wins over `None` so `#[config(default = ...)]` on an `Option` field is not silently ignored.
     let absent = match default {
-        Some(default) => quote! { { #default } },
+        Some(FieldDefault::Trait) => quote! { ::core::default::Default::default() },
+        // `DefaultFrom` lets `default = "localhost"` fill a `String` while integer literals still infer the field type.
+        Some(FieldDefault::Expr(expr)) => quote! { <#ty as ::cfgy::__private::DefaultFrom<_>>::default_from(#expr) },
         None if field.required() => quote! {
             return ::core::result::Result::Err(
                 __cfgy_path.with_key(#key, |__cfgy_path| ::cfgy::ConfigError::missing(__cfgy_path)),
@@ -168,8 +170,21 @@ mod tests {
         assert!(out.contains("__cfgy_map . get (\"type\")"), "{out}");
         assert!(out.contains("< String as :: cfgy :: FromValue >"), "{out}");
         assert!(out.contains(":: cfgy :: Value :: Null"), "{out}");
-        assert!(out.contains("{ 8080 }"), "{out}");
+        assert!(out.contains("< u16 as :: cfgy :: __private :: DefaultFrom < _ >> :: default_from (8080)"), "{out}");
         assert_eq!(out.matches("ConfigError :: missing").count(), 1, "{out}");
+    }
+
+    #[test]
+    fn bare_default_calls_default_trait() {
+        let out = expand_str(&parse_quote! {
+            struct Settings {
+                #[config(default)]
+                tags: Vec<String>,
+            }
+        });
+        assert!(out.contains(":: core :: default :: Default :: default ()"), "{out}");
+        assert!(!out.contains("DefaultFrom"), "{out}");
+        assert!(!out.contains("ConfigError :: missing"), "{out}");
     }
 
     // The plan rejects `format = "yaml"` unless the feature is enabled.

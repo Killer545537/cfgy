@@ -209,8 +209,8 @@
 //!   rejected by the check even though it would load; use `check = false` for such structs.
 //! - **`Option` is recognised by syntax.** A field must be written `Option<T>` (or `std::option::Option<T>`) to be
 //!   optional. `type MaybePort = Option<u16>;` makes the key required.
-//! - **`default` is a plain expression.** `#[config(default = "localhost")]` on a `String` field does not compile
-//!   because the literal is a `&str`; write `default = "localhost".into()`.
+//! - **`default` converts through `DefaultFrom`.** `#[config(default = "localhost")]` works on a `String` field, but an
+//!   expression whose type must itself be inferred, such as `"localhost".into()`, is ambiguous; drop the `.into()`.
 //! - **The check reflects the build machine only.** A file that passes the check can still fail to load in another
 //!   environment, and `check = false` structs are only validated at runtime.
 //! - **Structs only.** Enums, unions, tuple structs, unit structs, and generic structs cannot derive `FromConfig`.
@@ -223,7 +223,7 @@
 //! #[derive(FromConfig)]
 //! #[config(path = "config.toml", check = false)]
 //! struct Settings {
-//!     #[config(default = "localhost".into())]
+//!     #[config(default = "localhost")]
 //!     host: String,
 //! }
 //!

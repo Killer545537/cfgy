@@ -5,7 +5,7 @@ use syn::ext::IdentExt;
 use syn::meta::ParseNestedMeta;
 use syn::{
     Attribute, Data, DeriveInput, Error, Expr, Fields, GenericArgument, Generics, Ident, LitBool, LitStr,
-    PathArguments, Type,
+    PathArguments, Token, Type,
 };
 
 /// Everything codegen needs to know about a derived struct.
@@ -33,7 +33,15 @@ pub struct FieldPlan {
     pub ty: Type,
     /// `Some(inner)` when the field is `Option<inner>`.
     pub optional: Option<Type>,
-    pub default: Option<Expr>,
+    pub default: Option<FieldDefault>,
+}
+
+/// A field's `#[config(default)]` or `#[config(default = <expr>)]`.
+pub enum FieldDefault {
+    /// Bare `default`: `Default::default()`.
+    Trait,
+    /// `default = <expr>`, converted into the field type through `DefaultFrom`.
+    Expr(Expr),
 }
 
 impl FieldPlan {
@@ -116,7 +124,7 @@ struct Options {
     format: Option<(Ident, LitStr)>,
     check: Option<(Ident, LitBool)>,
     rename: Option<LitStr>,
-    default: Option<Expr>,
+    default: Option<FieldDefault>,
 }
 
 /// Parses every `#[config(...)]` in `attrs`, pushing errors instead of stopping at the first.
@@ -141,7 +149,15 @@ fn parse_option(options: &mut Options, meta: &ParseNestedMeta, site: Site, error
         "format" => (Site::Struct, options.format.replace((key.clone(), meta.value()?.parse()?)).is_some()),
         "check" => (Site::Struct, options.check.replace((key.clone(), meta.value()?.parse()?)).is_some()),
         "rename" => (Site::Field, options.rename.replace(meta.value()?.parse()?).is_some()),
-        "default" => (Site::Field, options.default.replace(meta.value()?.parse()?).is_some()),
+        "default" => {
+            // Bare `default` means `Default::default()`, as with serde.
+            let default = if meta.input.is_empty() || meta.input.peek(Token![,]) {
+                FieldDefault::Trait
+            } else {
+                FieldDefault::Expr(meta.value()?.parse()?)
+            };
+            (Site::Field, options.default.replace(default).is_some())
+        }
         _ => return Err(meta.error(format!("unknown `config` option `{key}`"))),
     };
     match (site, expected) {
@@ -290,7 +306,29 @@ mod tests {
         })
         .unwrap();
         let expected: Expr = parse_quote!(8080 + 1);
-        assert_eq!(plan.fields[0].default, Some(expected));
+        assert!(matches!(&plan.fields[0].default, Some(FieldDefault::Expr(expr)) if *expr == expected));
+    }
+
+    #[test]
+    fn bare_default_is_the_default_trait() {
+        let plan = build(&parse_quote! {
+            struct Settings {
+                #[config(default)]
+                tags: Vec<String>,
+                #[config(default, rename = "n")]
+                count: u8,
+            }
+        })
+        .unwrap();
+        assert!(matches!(plan.fields[0].default, Some(FieldDefault::Trait)));
+        assert!(matches!(plan.fields[1].default, Some(FieldDefault::Trait)));
+        assert_eq!(plan.fields[1].key, "n");
+    }
+
+    #[test]
+    fn rejects_duplicate_bare_default() {
+        let msg = error(&parse_quote! { struct S { #[config(default, default = 1)] a: u8 } });
+        assert_eq!(msg, "duplicate `default` option");
     }
 
     #[test]

@@ -104,7 +104,9 @@ impl ::cfgy::FromValue for Settings {
                             ),
                         )?
                 }
-                ::core::option::Option::None => 30,
+                ::core::option::Option::None => {
+                    <u64 as ::cfgy::__private::DefaultFrom<_>>::default_from(30)
+                }
             },
         })
     }
