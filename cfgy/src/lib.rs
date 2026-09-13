@@ -131,8 +131,9 @@
 //! 2. the file extension: `.toml`, `.json`, `.yaml`, or `.yml` (case-sensitive);
 //! 3. only when the file has no extension, its content: a leading `{` is JSON, a leading `---` is YAML.
 //!
-//! An unknown extension is an error, never a guess, as is a format whose feature is disabled. The compile-time check
-//! reports these as build errors; with `check = false` they surface from `load` as [`ConfigError::UnknownFormat`].
+//! An unknown extension is an error, never a guess, as is a format whose feature is disabled. An unknown or disabled
+//! `format` name is always a build error. An unknown extension is a build error from the compile-time check; with
+//! `check = false`, or for a `load_from` path, it surfaces at runtime as [`ConfigError::UnknownFormat`].
 //!
 //! # Compile-time check
 //!

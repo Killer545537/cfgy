@@ -167,6 +167,8 @@ mod tests {
         assert_eq!(out.matches("ConfigError :: missing").count(), 1, "{out}");
     }
 
+    // The plan rejects `format = "yaml"` unless the feature is enabled.
+    #[cfg(feature = "yaml")]
     #[test]
     fn expansion_snapshot() {
         let input = parse_quote! {

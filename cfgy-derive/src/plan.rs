@@ -172,6 +172,13 @@ fn source_plan(options: Options, errors: &mut Vec<Error>) -> Option<SourcePlan> 
         errors.extend(keys.map(|key| Error::new(key.span(), format!("`{key}` requires `path`"))));
         return None;
     };
+    // Validated here rather than in the file check so it also holds with `check = false`. An explicit name wins over
+    // path and content in `select`, so the empty arguments are never consulted.
+    if let Some((_, format)) = &options.format {
+        if let Err(error) = cfgy_formats::select(Some(&format.value()), std::path::Path::new(""), "") {
+            errors.push(Error::new(format.span(), error.message));
+        }
+    }
     Some(SourcePlan {
         path,
         format: options.format.map(|(_, format)| format),
@@ -245,6 +252,7 @@ mod tests {
         build(input).err().expect("expected an error").into_iter().map(|e| e.to_string()).collect()
     }
 
+    #[cfg(feature = "json")]
     #[test]
     fn parses_source_options() {
         let plan = build(&parse_quote! {
@@ -303,6 +311,19 @@ mod tests {
     fn rejects_field_option_on_struct() {
         let msg = error(&parse_quote! { #[config(path = "a.toml", rename = "b")] struct S { a: u8 } });
         assert_eq!(msg, "`rename` is a field-level option and cannot be used on the struct");
+    }
+
+    #[test]
+    fn rejects_unknown_format_even_without_check() {
+        let msg = error(&parse_quote! { #[config(path = "a.conf", format = "ini", check = false)] struct S { a: u8 } });
+        assert_eq!(msg, "unknown format `ini`, expected toml, json, or yaml");
+    }
+
+    #[cfg(not(feature = "yaml"))]
+    #[test]
+    fn rejects_format_with_disabled_feature() {
+        let msg = error(&parse_quote! { #[config(path = "a.yml", format = "yml")] struct S { a: u8 } });
+        assert!(msg.contains("enable the `yaml` cargo feature"), "{msg}");
     }
 
     #[test]

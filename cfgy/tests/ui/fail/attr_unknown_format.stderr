@@ -1,0 +1,5 @@
+error: unknown format `ini`, expected toml, json, or yaml
+ --> tests/ui/fail/attr_unknown_format.rs:5:43
+  |
+5 | #[config(path = "settings.conf", format = "ini", check = false)]
+  |                                           ^^^^^
