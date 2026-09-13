@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use cfgy::FromConfig;
 
 #[derive(FromConfig, Debug, PartialEq)]
-#[config(path = "../../../../cfgy/tests/ui/pass/map.toml")]
+#[config(path = "fixtures/pass/map.toml")]
 struct Features {
     features: HashMap<String, bool>,
 }

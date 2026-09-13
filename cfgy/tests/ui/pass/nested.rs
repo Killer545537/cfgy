@@ -7,7 +7,7 @@ struct Database {
 }
 
 #[derive(FromConfig, Debug, PartialEq)]
-#[config(path = "../../../../cfgy/tests/ui/pass/nested.toml")]
+#[config(path = "fixtures/pass/nested.toml")]
 struct Settings {
     name: String,
     database: Database,
