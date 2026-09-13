@@ -78,6 +78,7 @@ dependencies = [
  "indexmap",
  "proptest",
  "saphyr",
+ "saphyr-parser",
  "serde_json",
  "toml",
 ]
