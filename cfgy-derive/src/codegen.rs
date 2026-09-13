@@ -41,7 +41,7 @@ fn load_impl(plan: &StructPlan, source: &SourcePlan) -> TokenStream2 {
         || quote! { ::core::option::Option::None },
         |format| quote! { ::core::option::Option::Some(#format) },
     );
-    let load_doc = format!("Loads `{ident}` from `{}`, relative to the current working directory.", path.value());
+    let load_doc = format!(" Loads `{ident}` from `{}`, relative to the current working directory.", path.value());
     quote! {
         impl #impl_generics #ident #ty_generics #where_clause {
             #[doc = #load_doc]
@@ -165,5 +165,30 @@ mod tests {
         assert!(out.contains(":: cfgy :: Value :: Null"), "{out}");
         assert!(out.contains("{ 8080 }"), "{out}");
         assert_eq!(out.matches("ConfigError :: missing").count(), 1, "{out}");
+    }
+
+    #[test]
+    fn expansion_snapshot() {
+        let input = parse_quote! {
+            #[config(path = "config/settings.yaml", format = "yaml")]
+            struct Settings {
+                #[config(rename = "type")]
+                kind: String,
+                server: Server,
+                replicas: Vec<Server>,
+                description: Option<String>,
+                #[config(default = 30)]
+                timeout_secs: u64,
+            }
+        };
+        let file = syn::parse2::<syn::File>(expand(&plan::build(&input).unwrap())).unwrap();
+        let actual = prettyplease::unparse(&file);
+        if std::env::var("CFGY_BLESS").is_ok_and(|bless| bless == "1") {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/snapshots/settings.expanded.rs");
+            std::fs::write(path, actual).unwrap();
+            return;
+        }
+        let expected = include_str!("../tests/snapshots/settings.expanded.rs");
+        assert_eq!(actual, expected, "expansion changed; rerun with CFGY_BLESS=1 to update the snapshot");
     }
 }
