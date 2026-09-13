@@ -7,7 +7,7 @@ struct Server {
 }
 
 #[derive(FromConfig, Debug, PartialEq)]
-#[config(path = "../../../../cfgy/tests/ui/pass/seq_of_structs.toml")]
+#[config(path = "fixtures/pass/seq_of_structs.toml")]
 struct Cluster {
     servers: Vec<Server>,
 }

@@ -1,7 +1,7 @@
 use cfgy::{ConfigError, FromConfig};
 
 #[derive(FromConfig, Debug, PartialEq)]
-#[config(path = "../../../../cfgy/tests/ui/pass/flat.toml")]
+#[config(path = "fixtures/pass/flat.toml")]
 struct Flat {
     name: String,
     port: u16,
