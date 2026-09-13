@@ -56,6 +56,8 @@ struct Settings {
     replicas: Vec<Server>,
     features: HashMap<String, bool>,
     description: Option<String>,
+    /// A native datetime in TOML, a string in JSON and YAML.
+    deployed_at: String,
     log_file: Option<PathBuf>,
     #[config(default = 30)]
     timeout_secs: u64,
@@ -72,6 +74,7 @@ fn expected_settings() -> Settings {
         replicas: vec![server("10.0.0.2", 8081), server("10.0.0.3", 8082)],
         features: HashMap::from([("metrics".to_owned(), true), ("tracing".to_owned(), false)]),
         description: Some("primary API".to_owned()),
+        deployed_at: "1979-05-27T07:32:00Z".to_owned(),
         log_file: None,
         timeout_secs: 30,
     }

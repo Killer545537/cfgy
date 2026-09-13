@@ -74,7 +74,8 @@ impl FromValue for bool {
 impl FromValue for String {
     fn from_value(value: &Value, path: &mut PathStack) -> Result<Self, ConfigError> {
         match value {
-            Value::Str(s) => Ok(s.clone()),
+            // A TOML datetime is text in JSON and YAML, so accept it here too or the formats would disagree.
+            Value::Str(s) | Value::Datetime(Datetime(s)) => Ok(s.clone()),
             _ => Err(ConfigError::type_mismatch(path, "string", value)),
         }
     }
@@ -314,6 +315,7 @@ mod tests {
         assert_eq!(conv::<Datetime>(&Value::Datetime(Datetime(stamp.into()))).unwrap(), Datetime(stamp.into()));
         assert_eq!(conv::<Datetime>(&Value::Str(stamp.into())).unwrap(), Datetime(stamp.into()));
         assert!(matches!(conv::<Datetime>(&Value::Int(0)), Err(ConfigError::Type { expected: "datetime", .. })));
+        assert_eq!(conv::<String>(&Value::Datetime(Datetime(stamp.into()))).unwrap(), stamp);
     }
 
     #[test]

@@ -154,7 +154,8 @@
 //! | `i8`..`i128`, `isize`, `u8`..`u128`, `usize` | integers, range-checked |
 //! | `f64`, `f32` | floats; integers within `i32` (for `f64`) or `i16` (for `f32`) |
 //! | `bool` | booleans |
-//! | `String`, `PathBuf` | strings |
+//! | `String` | strings and datetimes |
+//! | `PathBuf` | strings |
 //! | `char` | one-character strings |
 //! | [`Datetime`] | TOML datetimes, or strings; the text is kept as written |
 //! | `Option<T>` | a `T`, an absent key, or null |
@@ -170,8 +171,8 @@
 //!   fields accept only values up to `i64::MAX`.
 //! - Integers widen to floats only when exact (see the table); write `1.0e10` for large float values.
 //! - A float is never an integer, even `1.0`. A string is never a number. An integer is never a bool.
-//! - A TOML datetime is a [`Datetime`], not a string, so a `String` field rejects it. JSON and YAML have no datetime
-//!   type; their strings convert into either.
+//! - A TOML datetime converts into either a [`Datetime`] or a `String`. JSON and YAML have no datetime type; their
+//!   strings also convert into either, so the same config loads identically from every format.
 //! - Keys in the file that no field reads are ignored.
 //! - An absent key is `None` for an `Option` field, the default for a `default` field, and an error otherwise.
 //! - A key present with a null value (JSON `null`, YAML `~`) is `None` for an `Option` field and a type error for a

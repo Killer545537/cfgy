@@ -1,6 +1,7 @@
 {
   "type": "web",
   "description": "primary API",
+  "deployed_at": "1979-05-27T07:32:00Z",
   "server": { "host": "0.0.0.0", "port": 8080 },
   "replicas": [
     { "host": "10.0.0.2", "port": 8081 },
