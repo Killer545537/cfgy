@@ -138,11 +138,12 @@ fn parse_options(attrs: &[Attribute], site: Site, errors: &mut Vec<Error>) -> Op
     options
 }
 
-/// Parses one `key = value` option. Misplaced and duplicate options are pushed to `errors`
-/// so parsing continues; unknown options and malformed values abort the attribute.
+/// Parses one `key = value` option. Unknown, misplaced, and duplicate options are pushed to `errors` so parsing
+/// continues; only a malformed value aborts the attribute.
 fn parse_option(options: &mut Options, meta: &ParseNestedMeta, site: Site, errors: &mut Vec<Error>) -> syn::Result<()> {
     let Some(key) = meta.path.get_ident().cloned() else {
-        return Err(meta.error("unknown `config` option"));
+        errors.push(meta.error("unknown `config` option"));
+        return skip_value(meta);
     };
     let (expected, duplicate) = match key.to_string().as_str() {
         "path" => (Site::Struct, options.path.replace(meta.value()?.parse()?).is_some()),
@@ -158,7 +159,10 @@ fn parse_option(options: &mut Options, meta: &ParseNestedMeta, site: Site, error
             };
             (Site::Field, options.default.replace(default).is_some())
         }
-        _ => return Err(meta.error(format!("unknown `config` option `{key}`"))),
+        _ => {
+            errors.push(meta.error(format!("unknown `config` option `{key}`")));
+            return skip_value(meta);
+        }
     };
     match (site, expected) {
         (Site::Field, Site::Struct) => {
@@ -177,6 +181,16 @@ fn parse_option(options: &mut Options, meta: &ParseNestedMeta, site: Site, error
     }
     if duplicate {
         errors.push(Error::new(key.span(), format!("duplicate `{key}` option")));
+    }
+    Ok(())
+}
+
+/// Consumes the `= <expr>` or `(...)` after an unknown option, so the options after it are still parsed.
+fn skip_value(meta: &ParseNestedMeta) -> syn::Result<()> {
+    if meta.input.peek(Token![=]) {
+        meta.value()?.parse::<Expr>()?;
+    } else if meta.input.peek(syn::token::Paren) {
+        meta.input.parse::<proc_macro2::TokenTree>()?;
     }
     Ok(())
 }
@@ -337,6 +351,28 @@ mod tests {
             error(&parse_quote! { #[config(nope = 1)] struct S { a: u8 } }).contains("unknown `config` option `nope`")
         );
         assert!(error(&parse_quote! { struct S { #[config(nope)] a: u8 } }).contains("unknown `config` option `nope`"));
+    }
+
+    #[test]
+    fn keeps_parsing_after_an_unknown_option() {
+        let errors = messages(&parse_quote! {
+            #[config(bogus = 1 + 2, nested(a, b = 3), a::b, path = "a.toml", rename = "x")]
+            struct S {
+                #[config(nope, path = "b.toml")]
+                a: u8,
+            }
+        });
+        assert_eq!(
+            errors,
+            [
+                "unknown `config` option `bogus`",
+                "unknown `config` option `nested`",
+                "unknown `config` option",
+                "`rename` is a field-level option and cannot be used on the struct",
+                "unknown `config` option `nope`",
+                "`path` is a struct-level option and cannot be used on a field",
+            ]
+        );
     }
 
     #[test]
