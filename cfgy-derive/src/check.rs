@@ -9,24 +9,24 @@ use syn::{GenericArgument, LitStr, PathArguments, PathSegment, Type};
 use crate::plan::{FieldPlan, SourcePlan, StructPlan};
 
 /// Reads, parses, and type-checks the config file of `plan`, unless it has no `path` or sets `check = false`.
-pub fn check(plan: &StructPlan) -> syn::Result<()> {
+///
+/// Returns the resolved path of the checked file, so the caller can register it as a build dependency.
+pub fn check(plan: &StructPlan) -> syn::Result<Option<PathBuf>> {
     let Some(source) = plan.source.as_ref().filter(|source| source.check) else {
-        return Ok(());
+        return Ok(None);
     };
     let manifest_dir = env::var_os("CARGO_MANIFEST_DIR")
         .ok_or_else(|| syn::Error::new(source.path.span(), "`CARGO_MANIFEST_DIR` is not set"))?;
-    check_source(Path::new(&manifest_dir), source, &plan.fields)
+    check_source(Path::new(&manifest_dir), source, &plan.fields).map(Some)
 }
 
-/// The config file's location: `path` joined onto the crate's manifest directory.
-pub fn resolved_path(manifest_dir: &Path, source: &SourcePlan) -> PathBuf {
-    manifest_dir.join(source.path.value())
-}
-
-/// Checks the file `source` points at, with every error spanned on its `path` literal.
-pub fn check_source(manifest_dir: &Path, source: &SourcePlan, fields: &[FieldPlan]) -> syn::Result<()> {
-    let resolved = resolved_path(manifest_dir, source);
-    let file = resolved.display();
+/// Checks the file `source` points at, relative to `manifest_dir`, with every error spanned on its `path` literal.
+///
+/// Messages name the file as written in the attribute, not the resolved absolute path, so they read the same on
+/// every machine.
+pub fn check_source(manifest_dir: &Path, source: &SourcePlan, fields: &[FieldPlan]) -> syn::Result<PathBuf> {
+    let file = source.path.value();
+    let resolved = manifest_dir.join(&file);
     let error = |message: String| syn::Error::new(source.path.span(), message);
 
     let text = fs::read_to_string(&resolved).map_err(|err| error(format!("config file `{file}` not found: {err}")))?;
@@ -44,7 +44,7 @@ pub fn check_source(manifest_dir: &Path, source: &SourcePlan, fields: &[FieldPla
             all.combine(next);
             all
         })
-        .map_or(Ok(()), Err)
+        .map_or(Ok(resolved), Err)
 }
 
 /// Checks `root` against `fields`, returning every error message rather than stopping at the first.
@@ -213,7 +213,7 @@ mod tests {
     fn check_file(name: &str, contents: &str, input: &DeriveInput) -> Vec<String> {
         let fields = plan::build(input).unwrap().fields;
         match check_source(&manifest_dir(name, contents), &source(name), &fields) {
-            Ok(()) => Vec::new(),
+            Ok(_) => Vec::new(),
             Err(err) => err.into_iter().map(|err| err.to_string()).collect(),
         }
     }
@@ -319,8 +319,7 @@ mod tests {
     fn missing_file_fails() {
         let dir = manifest_dir("other.txt", "");
         let err = check_source(&dir, &source("missing.toml"), &[]).unwrap_err().to_string();
-        let expected = format!("config file `{}` not found: ", dir.join("missing.toml").display());
-        assert!(err.starts_with(&expected), "{err}");
+        assert!(err.starts_with("config file `missing.toml` not found: "), "{err}");
     }
 
     #[test]
@@ -345,7 +344,7 @@ mod tests {
     fn malformed_toml_reports_line_and_col() {
         let dir = manifest_dir("bad.toml", "a = 1\nb = = 2");
         let err = check_source(&dir, &source("bad.toml"), &[]).unwrap_err().to_string();
-        assert!(err.starts_with(&format!("{}:2:5: ", dir.join("bad.toml").display())), "{err}");
+        assert!(err.starts_with("bad.toml:2:5: "), "{err}");
     }
 
     #[cfg(feature = "toml")]
@@ -354,6 +353,9 @@ mod tests {
         let input = parse_quote! { struct S { host: String, port: u16, database: Database } };
         let errors = check_file("ok.toml", "host = \"localhost\"\nport = 8080\n[database]\nurl = 1\n", &input);
         assert_eq!(errors, NONE);
+        let dir = manifest_dir("ok.toml", "host = \"a\"\nport = 1\n[database]\n");
+        let fields = plan::build(&input).unwrap().fields;
+        assert_eq!(check_source(&dir, &source("ok.toml"), &fields).unwrap(), dir.join("ok.toml"));
     }
 
     #[cfg(feature = "toml")]
