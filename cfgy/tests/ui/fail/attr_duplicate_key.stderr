@@ -3,3 +3,9 @@ error: duplicate config key `port`
   |
 6 |     #[config(rename = "port")]
   |                       ^^^^^^
+
+error: first used here
+ --> tests/ui/fail/attr_duplicate_key.rs:5:5
+  |
+5 |     port: u16,
+  |     ^^^^

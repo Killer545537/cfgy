@@ -85,8 +85,10 @@ pub fn build(input: &DeriveInput) -> syn::Result<StructPlan> {
         let (key, key_span) = options
             .rename
             .map_or_else(|| (ident.unraw().to_string(), ident.span()), |rename| (rename.value(), rename.span()));
-        if plans.iter().any(|plan| plan.key == key) {
-            errors.push(Error::new(key_span, format!("duplicate config key `{key}`")));
+        if let Some(first) = plans.iter().find(|plan| plan.key == key) {
+            let mut error = Error::new(key_span, format!("duplicate config key `{key}`"));
+            error.combine(Error::new(first.key_span, "first used here"));
+            errors.push(error);
         }
         plans.push(FieldPlan {
             ident,
@@ -458,15 +460,15 @@ mod tests {
     }
 
     #[test]
-    fn rejects_duplicate_key_after_rename() {
-        let msg = error(&parse_quote! {
+    fn rejects_duplicate_key_after_rename_pointing_at_the_first_use() {
+        let errors = messages(&parse_quote! {
             struct S {
                 port: u16,
                 #[config(rename = "port")]
                 other: u16,
             }
         });
-        assert_eq!(msg, "duplicate config key `port`");
+        assert_eq!(errors, ["duplicate config key `port`", "first used here"]);
     }
 
     #[test]
