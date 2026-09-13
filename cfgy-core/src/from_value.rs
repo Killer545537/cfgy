@@ -33,9 +33,33 @@ pub trait FromValue: Sized {
     }
 }
 
+/// The [`Shape::Int`] of a `bits`-wide integer type.
+///
+/// `From` is not const and `as` is banned, so the bounds come from shifting `i128`'s own, which also gets `isize` and
+/// `usize` right on every target. `u128::MAX` does not fit and is clamped to `i128::MAX`, the most a `Value::Int` holds.
+const fn int_shape(name: &'static str, bits: u32, signed: bool) -> Shape {
+    let shift = 128_u32.saturating_sub(bits);
+    let (min, max) = if signed {
+        // An arithmetic shift of `i128::MIN` keeps the sign: -2^(bits-1), whose complement is 2^(bits-1) - 1.
+        let min = match i128::MIN.checked_shr(shift) {
+            Some(min) => min,
+            None => i128::MIN,
+        };
+        (min, !min)
+    } else {
+        match i128::MAX.checked_shr(shift.saturating_sub(1)) {
+            Some(max) => (0, max),
+            None => (0, i128::MAX),
+        }
+    };
+    Shape::Int { min, max, name }
+}
+
 macro_rules! impl_int {
     ($($t:ty),*) => {$(
         impl FromValue for $t {
+            const SHAPE: &'static Shape = &int_shape(stringify!($t), <$t>::BITS, <$t>::MIN != 0);
+
             fn from_value(value: &Value, path: &mut PathStack) -> Result<Self, ConfigError> {
                 let Value::Int(i) = value else {
                     return Err(ConfigError::type_mismatch(path, stringify!($t), value));
@@ -56,6 +80,8 @@ fn widen<F: std::str::FromStr>(i: i128) -> Option<F> {
 }
 
 impl FromValue for f64 {
+    const SHAPE: &'static Shape = &Shape::Float { max: Self::MAX, name: "f64" };
+
     fn from_value(value: &Value, path: &mut PathStack) -> Result<Self, ConfigError> {
         match value {
             Value::Float(f) => Ok(*f),
@@ -66,6 +92,11 @@ impl FromValue for f64 {
 }
 
 impl FromValue for f32 {
+    // Not `f32::MAX`: narrowing rounds to nearest, so finite values a little above it still land on `f32::MAX`. This is
+    // 2^128 - 2^103, the largest `f64` that still narrows to a finite `f32` (its shortest decimal sits just below the
+    // halfway point, so it rounds down). The float tests pin the boundary on both sides.
+    const SHAPE: &'static Shape = &Shape::Float { max: 3.402_823_567_797_336_6e38, name: "f32" };
+
     fn from_value(value: &Value, path: &mut PathStack) -> Result<Self, ConfigError> {
         match value {
             // `as` is banned and std has no checked f64 -> f32, so go through the shortest round-trip decimal, which
@@ -82,6 +113,8 @@ impl FromValue for f32 {
 }
 
 impl FromValue for bool {
+    const SHAPE: &'static Shape = &Shape::Bool;
+
     fn from_value(value: &Value, path: &mut PathStack) -> Result<Self, ConfigError> {
         match value {
             Value::Bool(b) => Ok(*b),
@@ -91,6 +124,8 @@ impl FromValue for bool {
 }
 
 impl FromValue for String {
+    const SHAPE: &'static Shape = &Shape::String;
+
     fn from_value(value: &Value, path: &mut PathStack) -> Result<Self, ConfigError> {
         match value {
             // A TOML datetime is text in JSON and YAML, so accept it here too or the formats would disagree.
@@ -101,6 +136,8 @@ impl FromValue for String {
 }
 
 impl FromValue for PathBuf {
+    const SHAPE: &'static Shape = &Shape::Path;
+
     fn from_value(value: &Value, path: &mut PathStack) -> Result<Self, ConfigError> {
         match value {
             Value::Str(s) => Ok(Self::from(s)),
@@ -110,6 +147,8 @@ impl FromValue for PathBuf {
 }
 
 impl FromValue for char {
+    const SHAPE: &'static Shape = &Shape::Char;
+
     fn from_value(value: &Value, path: &mut PathStack) -> Result<Self, ConfigError> {
         if let Value::Str(s) = value {
             let mut chars = s.chars();
@@ -130,18 +169,24 @@ fn seq<T: FromValue, C: FromIterator<T>>(value: &Value, path: &mut PathStack) ->
 }
 
 impl<T: FromValue> FromValue for Vec<T> {
+    const SHAPE: &'static Shape = &Shape::Seq(T::SHAPE);
+
     fn from_value(value: &Value, path: &mut PathStack) -> Result<Self, ConfigError> {
         seq(value, path)
     }
 }
 
 impl<T: FromValue> FromValue for VecDeque<T> {
+    const SHAPE: &'static Shape = &Shape::Seq(T::SHAPE);
+
     fn from_value(value: &Value, path: &mut PathStack) -> Result<Self, ConfigError> {
         seq(value, path)
     }
 }
 
 impl<T: FromValue + Eq + Hash, S: BuildHasher + Default> FromValue for HashSet<T, S> {
+    const SHAPE: &'static Shape = &Shape::Seq(T::SHAPE);
+
     fn from_value(value: &Value, path: &mut PathStack) -> Result<Self, ConfigError> {
         seq(value, path)
     }
@@ -156,18 +201,24 @@ fn map<T: FromValue, C: FromIterator<(String, T)>>(value: &Value, path: &mut Pat
 }
 
 impl<T: FromValue, S: BuildHasher + Default> FromValue for HashMap<String, T, S> {
+    const SHAPE: &'static Shape = &Shape::Map(T::SHAPE);
+
     fn from_value(value: &Value, path: &mut PathStack) -> Result<Self, ConfigError> {
         map(value, path)
     }
 }
 
 impl<T: FromValue> FromValue for BTreeMap<String, T> {
+    const SHAPE: &'static Shape = &Shape::Map(T::SHAPE);
+
     fn from_value(value: &Value, path: &mut PathStack) -> Result<Self, ConfigError> {
         map(value, path)
     }
 }
 
 impl<T: FromValue, S: BuildHasher + Default> FromValue for IndexMap<String, T, S> {
+    const SHAPE: &'static Shape = &Shape::Map(T::SHAPE);
+
     fn from_value(value: &Value, path: &mut PathStack) -> Result<Self, ConfigError> {
         map(value, path)
     }
@@ -176,6 +227,8 @@ impl<T: FromValue, S: BuildHasher + Default> FromValue for IndexMap<String, T, S
 macro_rules! impl_tuple {
     ($len:literal => $(($t:ident $item:ident $i:literal)),+) => {
         impl<$($t: FromValue),+> FromValue for ($($t,)+) {
+            const SHAPE: &'static Shape = &Shape::Tuple(&[$($t::SHAPE),+]);
+
             fn from_value(value: &Value, path: &mut PathStack) -> Result<Self, ConfigError> {
                 let Value::Seq(items) = value else {
                     return Err(ConfigError::type_mismatch(path, "sequence", value));
@@ -197,6 +250,8 @@ impl_tuple!(4 => (A a 0), (B b 1), (C c 2), (D d 3));
 macro_rules! impl_pointer {
     ($($p:ident),*) => {$(
         impl<T: FromValue> FromValue for $p<T> {
+            const SHAPE: &'static Shape = T::SHAPE;
+
             fn from_value(value: &Value, path: &mut PathStack) -> Result<Self, ConfigError> {
                 T::from_value(value, path).map(Self::new)
             }
@@ -211,6 +266,8 @@ macro_rules! impl_pointer {
 impl_pointer!(Box, Rc, Arc);
 
 impl FromValue for Datetime {
+    const SHAPE: &'static Shape = &Shape::Datetime;
+
     fn from_value(value: &Value, path: &mut PathStack) -> Result<Self, ConfigError> {
         match value {
             Value::Datetime(d) => Ok(d.clone()),
@@ -222,6 +279,8 @@ impl FromValue for Datetime {
 }
 
 impl<T: FromValue> FromValue for Option<T> {
+    const SHAPE: &'static Shape = &Shape::Optional(T::SHAPE);
+
     fn from_value(value: &Value, path: &mut PathStack) -> Result<Self, ConfigError> {
         match value {
             Value::Null => Ok(None),
@@ -380,6 +439,60 @@ mod tests {
         assert_eq!(<Box<Option<u8>>>::from_missing(), Some(Box::new(None)));
         assert_eq!(u16::from_missing(), None);
         assert_eq!(<Vec<Option<u8>>>::from_missing(), None);
+    }
+
+    #[test]
+    fn integer_shapes_match_the_type_bounds() {
+        fn bounds<T: FromValue>() -> (i128, i128, &'static str) {
+            let Shape::Int { min, max, name } = T::SHAPE else { panic!("{:?}", T::SHAPE) };
+            (*min, *max, name)
+        }
+        assert_eq!(bounds::<i8>(), (-128, 127, "i8"));
+        assert_eq!(bounds::<u8>(), (0, 255, "u8"));
+        assert_eq!(bounds::<u16>(), (0, i128::from(u16::MAX), "u16"));
+        assert_eq!(bounds::<i32>(), (i128::from(i32::MIN), i128::from(i32::MAX), "i32"));
+        assert_eq!(bounds::<u64>(), (0, i128::from(u64::MAX), "u64"));
+        assert_eq!(bounds::<i128>(), (i128::MIN, i128::MAX, "i128"));
+        assert_eq!(bounds::<u128>(), (0, i128::MAX, "u128"));
+        assert_eq!(
+            bounds::<isize>(),
+            (i128::try_from(isize::MIN).unwrap(), i128::try_from(isize::MAX).unwrap(), "isize")
+        );
+        assert_eq!(bounds::<usize>(), (0, i128::try_from(usize::MAX).unwrap(), "usize"));
+    }
+
+    #[test]
+    fn float_shapes_bound_what_narrows_finitely() {
+        let Shape::Float { max, name: "f64" } = f64::SHAPE else { panic!() };
+        assert_eq!(max.to_bits(), f64::MAX.to_bits());
+        let Shape::Float { max, name: "f32" } = f32::SHAPE else { panic!() };
+        assert!(conv::<f32>(&Value::Float(*max)).unwrap().is_finite());
+        assert!(conv::<f32>(&Value::Float(-*max)).unwrap().is_finite());
+        assert!(conv::<f32>(&Value::Float(f64::from_bits(max.to_bits() + 1))).is_err());
+        assert!(*max > f64::from(f32::MAX));
+    }
+
+    #[test]
+    fn composite_shapes() {
+        // A type without its own shape still accepts anything.
+        struct Custom;
+        impl FromValue for Custom {
+            fn from_value(_: &Value, _: &mut PathStack) -> Result<Self, ConfigError> {
+                Ok(Self)
+            }
+        }
+        assert!(matches!(<Option<Custom>>::SHAPE, Shape::Optional(Shape::Any)));
+
+        assert!(matches!(bool::SHAPE, Shape::Bool));
+        assert!(matches!(String::SHAPE, Shape::String));
+        assert!(matches!(PathBuf::SHAPE, Shape::Path));
+        assert!(matches!(char::SHAPE, Shape::Char));
+        assert!(matches!(Datetime::SHAPE, Shape::Datetime));
+        assert!(matches!(<Vec<Option<u16>>>::SHAPE, Shape::Seq(Shape::Optional(Shape::Int { name: "u16", .. }))));
+        assert!(matches!(<HashSet<String>>::SHAPE, Shape::Seq(Shape::String)));
+        assert!(matches!(<BTreeMap<String, f32>>::SHAPE, Shape::Map(Shape::Float { name: "f32", .. })));
+        assert!(matches!(<Arc<Box<char>>>::SHAPE, Shape::Char));
+        assert!(matches!(<(u8, String)>::SHAPE, Shape::Tuple([Shape::Int { name: "u8", .. }, Shape::String])));
     }
 
     #[test]
