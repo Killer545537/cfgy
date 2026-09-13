@@ -22,6 +22,15 @@ pub trait FromValue: Sized {
     ///
     /// Returns [`ConfigError`] when `value` does not have the shape `Self` needs.
     fn from_value(value: &Value, path: &mut PathStack) -> Result<Self, ConfigError>;
+
+    /// The value for a key absent from its table, or `None` if absence is an error.
+    ///
+    /// This is serde's `missing_field`: `Option<T>` returns `Some(None)`, so optional fields work through type
+    /// aliases instead of depending on the field being spelled `Option<...>`.
+    #[must_use]
+    fn from_missing() -> Option<Self> {
+        None
+    }
 }
 
 macro_rules! impl_int {
@@ -185,6 +194,10 @@ macro_rules! impl_pointer {
             fn from_value(value: &Value, path: &mut PathStack) -> Result<Self, ConfigError> {
                 T::from_value(value, path).map(Self::new)
             }
+
+            fn from_missing() -> Option<Self> {
+                T::from_missing().map(Self::new)
+            }
         }
     )*};
 }
@@ -207,6 +220,10 @@ impl<T: FromValue> FromValue for Option<T> {
             Value::Null => Ok(None),
             _ => T::from_value(value, path).map(Some),
         }
+    }
+
+    fn from_missing() -> Option<Self> {
+        Some(None)
     }
 }
 
@@ -334,6 +351,15 @@ mod tests {
         let items = Value::Seq(vec![Value::Int(1), Value::Null, Value::Int(3)]);
         assert_eq!(conv::<Vec<Option<u8>>>(&items).unwrap(), [Some(1), None, Some(3)]);
         assert!(matches!(conv::<Option<u8>>(&Value::Str("x".into())), Err(ConfigError::Type { expected: "u8", .. })));
+    }
+
+    #[test]
+    fn from_missing_follows_the_type_not_its_spelling() {
+        type MaybePort = Option<u16>;
+        assert_eq!(MaybePort::from_missing(), Some(None));
+        assert_eq!(<Box<Option<u8>>>::from_missing(), Some(Box::new(None)));
+        assert_eq!(u16::from_missing(), None);
+        assert_eq!(<Vec<Option<u8>>>::from_missing(), None);
     }
 
     #[test]
