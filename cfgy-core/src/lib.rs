@@ -6,6 +6,7 @@ mod error;
 mod format;
 mod from_value;
 mod path;
+mod shape;
 mod value;
 
 pub use error::ConfigError;
@@ -13,4 +14,5 @@ pub use format::{Format, ParseError};
 pub use from_value::FromValue;
 pub use indexmap::IndexMap;
 pub use path::{PathStack, Segment};
+pub use shape::{Field, Repr, Shape, Variant};
 pub use value::{Datetime, Value};

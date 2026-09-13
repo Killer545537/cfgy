@@ -8,12 +8,16 @@ use std::{
 
 use indexmap::IndexMap;
 
-use crate::{ConfigError, Datetime, PathStack, Value};
+use crate::{ConfigError, Datetime, PathStack, Shape, Value};
 
 /// Conversion from the value IR into a Rust type.
 ///
 /// `path` locates `value` in the document; implementations push onto it before recursing.
 pub trait FromValue: Sized {
+    /// What this type accepts, for the derive's compile-time check. Defaults to [`Shape::Any`], so a type that does
+    /// not describe itself is never rejected at compile time; `from_value` still decides at runtime.
+    const SHAPE: &'static Shape = &Shape::Any;
+
     /// # Errors
     ///
     /// Returns [`ConfigError`] when `value` does not have the shape `Self` needs.
