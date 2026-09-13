@@ -1,0 +1,5 @@
+error: generic structs are not supported yet
+ --> tests/ui/fail/attr_generic_struct.rs:4:16
+  |
+4 | struct Settings<T> {
+  |                ^^^

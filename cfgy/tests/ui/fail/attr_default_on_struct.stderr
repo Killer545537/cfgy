@@ -1,0 +1,5 @@
+error: `default` is a field-level option and cannot be used on the struct
+ --> tests/ui/fail/attr_default_on_struct.rs:4:10
+  |
+4 | #[config(default = 8080)]
+  |          ^^^^^^^

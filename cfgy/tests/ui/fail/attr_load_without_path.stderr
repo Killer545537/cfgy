@@ -1,0 +1,8 @@
+error[E0599]: no associated function or constant named `load` found for struct `Settings` in the current scope
+  --> tests/ui/fail/attr_load_without_path.rs:10:23
+   |
+ 5 | struct Settings {
+   | --------------- associated function or constant `load` not found for this struct
+...
+10 |     let _ = Settings::load();
+   |                       ^^^^ associated function or constant not found in `Settings`

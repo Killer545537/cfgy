@@ -1,0 +1,5 @@
+error: ../../../../cfgy/tests/ui/fail/file_missing_key.toml: missing required key `port`
+ --> tests/ui/fail/file_missing_key.rs:4:17
+  |
+4 | #[config(path = "../../../../cfgy/tests/ui/fail/file_missing_key.toml")]
+  |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

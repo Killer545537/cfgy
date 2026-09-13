@@ -1,0 +1,5 @@
+error: unknown `config` option `optional`
+ --> tests/ui/fail/attr_unknown_option.rs:5:14
+  |
+5 |     #[config(optional)]
+  |              ^^^^^^^^

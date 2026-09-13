@@ -1,0 +1,5 @@
+error: `FromConfig` cannot be derived for tuple structs
+ --> tests/ui/fail/attr_tuple_struct.rs:4:12
+  |
+4 | struct Port(u16);
+  |            ^^^^^
