@@ -1,0 +1,5 @@
+error: config file `../../../../cfgy/tests/ui/fail/file_missing.toml` does not exist
+ --> tests/ui/fail/file_missing.rs:4:17
+  |
+4 | #[config(path = "../../../../cfgy/tests/ui/fail/file_missing.toml")]
+  |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
