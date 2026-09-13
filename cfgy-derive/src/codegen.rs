@@ -4,13 +4,14 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::{LitStr, Type};
 
-use crate::plan::{FieldPlan, StructPlan};
+use crate::plan::{FieldPlan, SourcePlan, StructPlan};
 
-/// Emits the `FromValue` impl for `plan`.
+/// Emits the `FromValue` impl for `plan`, plus the loading methods when it has a `path`.
 pub fn expand(plan: &StructPlan) -> TokenStream2 {
     let ident = &plan.ident;
     let (impl_generics, ty_generics, where_clause) = plan.generics.split_for_impl();
     let fields = plan.fields.iter().map(field_init);
+    let load = plan.source.as_ref().map(|source| load_impl(plan, source));
     quote! {
         #[automatically_derived]
         impl #impl_generics ::cfgy::FromValue for #ident #ty_generics #where_clause {
@@ -24,6 +25,74 @@ pub fn expand(plan: &StructPlan) -> TokenStream2 {
                     );
                 };
                 ::core::result::Result::Ok(Self { #(#fields)* })
+            }
+        }
+
+        #load
+    }
+}
+
+/// The inherent `load`, `load_from`, and `load_str` for a struct with `#[config(path = "...")]`.
+fn load_impl(plan: &StructPlan, source: &SourcePlan) -> TokenStream2 {
+    let ident = &plan.ident;
+    let (impl_generics, ty_generics, where_clause) = plan.generics.split_for_impl();
+    let path = &source.path;
+    let format = source.format.as_ref().map_or_else(
+        || quote! { ::core::option::Option::None },
+        |format| quote! { ::core::option::Option::Some(#format) },
+    );
+    let load_doc = format!("Loads `{ident}` from `{}`, relative to the current working directory.", path.value());
+    quote! {
+        impl #impl_generics #ident #ty_generics #where_clause {
+            #[doc = #load_doc]
+            ///
+            /// # Errors
+            ///
+            /// See [`Self::load_from`].
+            pub fn load() -> ::core::result::Result<Self, ::cfgy::ConfigError> {
+                Self::load_from(#path)
+            }
+
+            /// Loads the config file at `path`, choosing its format from the extension unless one was
+            /// given in `#[config(format = "...")]`.
+            ///
+            /// # Errors
+            ///
+            /// Returns [`ConfigError::Io`](::cfgy::ConfigError::Io) if the file cannot be read,
+            /// [`ConfigError::UnknownFormat`](::cfgy::ConfigError::UnknownFormat) if no format can be chosen,
+            /// and otherwise any error from [`Self::load_str`].
+            pub fn load_from(
+                path: impl ::core::convert::AsRef<::std::path::Path>,
+            ) -> ::core::result::Result<Self, ::cfgy::ConfigError> {
+                let __cfgy_path = path.as_ref();
+                let __cfgy_source = ::std::fs::read_to_string(__cfgy_path).map_err(|__cfgy_error| {
+                    ::cfgy::ConfigError::Io { path: __cfgy_path.to_path_buf(), source: __cfgy_error }
+                })?;
+                let __cfgy_format = ::cfgy::__private::select(#format, __cfgy_path, &__cfgy_source).map_err(
+                    |__cfgy_error| ::cfgy::ConfigError::UnknownFormat {
+                        path: __cfgy_path.to_path_buf(),
+                        message: __cfgy_error.message,
+                    },
+                )?;
+                Self::load_str(&__cfgy_source, __cfgy_format)
+            }
+
+            /// Parses `source` as `format` and converts it.
+            ///
+            /// # Errors
+            ///
+            /// Returns [`ConfigError::Parse`](::cfgy::ConfigError::Parse) if `source` is malformed, and a
+            /// conversion error if it does not match the struct.
+            pub fn load_str(
+                source: &str,
+                format: &dyn ::cfgy::Format,
+            ) -> ::core::result::Result<Self, ::cfgy::ConfigError> {
+                let __cfgy_value = format.parse(source).map_err(|__cfgy_error| ::cfgy::ConfigError::Parse {
+                    format: format.name(),
+                    line_col: __cfgy_error.line_col(source),
+                    message: __cfgy_error.message,
+                })?;
+                <Self as ::cfgy::FromValue>::from_value(&__cfgy_value, &mut ::cfgy::PathStack::new())
             }
         }
     }

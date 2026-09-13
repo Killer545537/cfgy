@@ -4,7 +4,7 @@
 //! Depend on that instead.
 
 mod codegen;
-// `SourcePlan` is unused until `load` codegen lands.
+// `SourcePlan::check` is unused until the compile-time check is wired in.
 #[allow(dead_code)]
 mod plan;
 
