@@ -48,13 +48,18 @@ macro_rules! impl_int {
 
 impl_int!(i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize);
 
-// ponytail: integers widen into floats only through a lossless `From` (i32 for f64, i16 for f32); larger ones are
-// rejected as out of range rather than silently rounded. Write `1.0e10` for big float literals.
+/// Widens any integer into a float, rounding to the nearest representable value like `as` (and serde) do.
+///
+/// `as` is banned and `From` only covers small integers, so go through the decimal text, which parses correctly rounded.
+fn widen<F: std::str::FromStr>(i: i128) -> Option<F> {
+    i.to_string().parse().ok()
+}
+
 impl FromValue for f64 {
     fn from_value(value: &Value, path: &mut PathStack) -> Result<Self, ConfigError> {
         match value {
             Value::Float(f) => Ok(*f),
-            Value::Int(i) => i32::try_from(*i).map(Self::from).map_err(|_| ConfigError::out_of_range(path, *i, "f64")),
+            Value::Int(i) => widen(*i).ok_or_else(|| ConfigError::out_of_range(path, *i, "f64")),
             _ => Err(ConfigError::type_mismatch(path, "f64", value)),
         }
     }
@@ -69,7 +74,8 @@ impl FromValue for f32 {
                 Ok(narrowed) if narrowed.is_finite() || !f.is_finite() => Ok(narrowed),
                 _ => Err(ConfigError::type_mismatch(path, "f32", value)),
             },
-            Value::Int(i) => i16::try_from(*i).map(Self::from).map_err(|_| ConfigError::out_of_range(path, *i, "f32")),
+            // Every i128 is below f32::MAX, so widening never overflows to infinity.
+            Value::Int(i) => widen(*i).ok_or_else(|| ConfigError::out_of_range(path, *i, "f32")),
             _ => Err(ConfigError::type_mismatch(path, "f32", value)),
         }
     }
@@ -256,16 +262,23 @@ mod tests {
     fn floats() {
         assert!((conv::<f64>(&Value::Float(1.5)).unwrap() - 1.5).abs() < f64::EPSILON);
         assert!((conv::<f64>(&Value::Int(-3)).unwrap() + 3.0).abs() < f64::EPSILON);
-        assert!(matches!(
-            conv::<f64>(&Value::Int(i128::from(i64::MAX))),
-            Err(ConfigError::OutOfRange { target: "f64", .. })
-        ));
+        // Every integer widens, rounding like `as`.
+        assert_eq!(
+            conv::<f64>(&Value::Int(i128::from(i64::MAX))).unwrap().to_bits(),
+            9_223_372_036_854_775_807_f64.to_bits()
+        );
+        assert_eq!(conv::<f64>(&Value::Int(i128::MAX)).unwrap().to_bits(), 1.701_411_834_604_692_3e38_f64.to_bits());
+        assert_eq!(conv::<f64>(&Value::Int(i128::MIN)).unwrap().to_bits(), (-1.701_411_834_604_692_3e38_f64).to_bits());
+        assert_eq!(conv::<f64>(&Value::Int((1 << 53) + 1)).unwrap().to_bits(), 9_007_199_254_740_992_f64.to_bits());
         assert!(matches!(conv::<f64>(&Value::Str("1.0".into())), Err(ConfigError::Type { found: "string", .. })));
         assert!((conv::<f32>(&Value::Float(0.1)).unwrap() - 0.1).abs() < f32::EPSILON);
         assert!((conv::<f32>(&Value::Int(7)).unwrap() - 7.0).abs() < f32::EPSILON);
         assert!(conv::<f32>(&Value::Float(f64::INFINITY)).unwrap().is_infinite());
         assert!(matches!(conv::<f32>(&Value::Float(1.0e300)), Err(ConfigError::Type { expected: "f32", .. })));
-        assert!(matches!(conv::<f32>(&Value::Int(40_000)), Err(ConfigError::OutOfRange { target: "f32", .. })));
+        assert!((conv::<f32>(&Value::Int(40_000)).unwrap() - 40_000.0).abs() < f32::EPSILON);
+        assert_eq!(conv::<f32>(&Value::Int(16_777_217)).unwrap().to_bits(), 16_777_216_f32.to_bits());
+        assert!(conv::<f32>(&Value::Int(i128::MAX)).unwrap().is_finite());
+        assert!(conv::<f32>(&Value::Int(i128::MIN)).unwrap().is_finite());
     }
 
     #[test]
