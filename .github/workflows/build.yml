@@ -37,8 +37,9 @@ jobs:
         with:
           key: ${{ matrix.toolchain }}
 
+      # MSRV covers the libraries only: dev-dependencies such as trybuild (rustc 1.88) may need a newer toolchain.
       - name: Build
-        run: cargo build --workspace --all-features --all-targets
+        run: cargo build --workspace --all-features ${{ matrix.toolchain == 'stable' && '--all-targets' || '' }}
 
       # Catches errors that only surface without the default feature set,
       # which matters because each format is feature-gated.
