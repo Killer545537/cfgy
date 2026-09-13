@@ -1,11 +1,51 @@
 //! Compile-time check: the config file's parsed [`Value`] is type-checked against the field plan.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::{env, fs};
 
 use cfgy_core::{ConfigError, Datetime, FromValue, PathStack, Value};
-use syn::{GenericArgument, PathArguments, PathSegment, Type};
+use syn::{GenericArgument, LitStr, PathArguments, PathSegment, Type};
 
-use crate::plan::FieldPlan;
+use crate::plan::{FieldPlan, SourcePlan, StructPlan};
+
+/// Reads, parses, and type-checks the config file of `plan`, unless it has no `path` or sets `check = false`.
+pub fn check(plan: &StructPlan) -> syn::Result<()> {
+    let Some(source) = plan.source.as_ref().filter(|source| source.check) else {
+        return Ok(());
+    };
+    let manifest_dir = env::var_os("CARGO_MANIFEST_DIR")
+        .ok_or_else(|| syn::Error::new(source.path.span(), "`CARGO_MANIFEST_DIR` is not set"))?;
+    check_source(Path::new(&manifest_dir), source, &plan.fields)
+}
+
+/// The config file's location: `path` joined onto the crate's manifest directory.
+pub fn resolved_path(manifest_dir: &Path, source: &SourcePlan) -> PathBuf {
+    manifest_dir.join(source.path.value())
+}
+
+/// Checks the file `source` points at, with every error spanned on its `path` literal.
+pub fn check_source(manifest_dir: &Path, source: &SourcePlan, fields: &[FieldPlan]) -> syn::Result<()> {
+    let resolved = resolved_path(manifest_dir, source);
+    let file = resolved.display();
+    let error = |message: String| syn::Error::new(source.path.span(), message);
+
+    let text = fs::read_to_string(&resolved).map_err(|err| error(format!("config file `{file}` not found: {err}")))?;
+    let format = cfgy_formats::select(source.format.as_ref().map(LitStr::value).as_deref(), &resolved, &text)
+        .map_err(|err| error(format!("config file `{file}`: {err}")))?;
+    let value = format.parse(&text).map_err(|err| match err.line_col(&text) {
+        Some((line, col)) => error(format!("{file}:{line}:{col}: {}", err.message)),
+        None => error(format!("{file}: {}", err.message)),
+    })?;
+
+    check_fields(fields, &value)
+        .into_iter()
+        .map(|message| error(format!("{file}: {message}")))
+        .reduce(|mut all, next| {
+            all.combine(next);
+            all
+        })
+        .map_or(Ok(()), Err)
+}
 
 /// Checks `root` against `fields`, returning every error message rather than stopping at the first.
 pub fn check_fields(fields: &[FieldPlan], root: &Value) -> Vec<String> {
@@ -53,7 +93,8 @@ fn check_type(ty: &Type, value: &Value, path: &mut PathStack, errors: &mut Vec<S
             Some(segment) => segment,
             None => return,
         },
-        // References, arrays, slices, trait objects, `<T as Trait>::Assoc`, ...: no runtime impl to mirror, so leave them to rustc.
+        // References, arrays, slices, trait objects, `<T as Trait>::Assoc`, ...: no runtime impl to mirror, so
+        // leave them to rustc.
         _ => return,
     };
     match segment.ident.to_string().as_str() {
@@ -157,6 +198,25 @@ mod tests {
         errors.into_iter().next().unwrap()
     }
 
+    /// A fresh directory holding `name` with `contents`, unique per test process and name.
+    fn manifest_dir(name: &str, contents: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("cfgy-check-{}-{name}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(name), contents).unwrap();
+        dir
+    }
+
+    fn source(path: &str) -> SourcePlan {
+        SourcePlan { path: LitStr::new(path, proc_macro2::Span::call_site()), format: None, check: true }
+    }
+
+    fn check_file(name: &str, contents: &str, input: &DeriveInput) -> Vec<String> {
+        let fields = plan::build(input).unwrap().fields;
+        match check_source(&manifest_dir(name, contents), &source(name), &fields) {
+            Ok(()) => Vec::new(),
+            Err(err) => err.into_iter().map(|err| err.to_string()).collect(),
+        }
+    }
     #[test]
     fn string_into_u16_fails_with_key() {
         let msg = one_error(&parse_quote! { struct S { port: u16 } }, &map(&[("port", Value::Str("eighty".into()))]));
@@ -253,5 +313,67 @@ mod tests {
         let input = parse_quote! { struct S { host: String, port: u16 } };
         let errors = errors(&input, &map(&[("host", Value::Int(1)), ("port", Value::Bool(true))]));
         assert_eq!(errors, ["`host`: expected string, found integer", "`port`: expected u16, found bool"]);
+    }
+
+    #[test]
+    fn missing_file_fails() {
+        let dir = manifest_dir("other.txt", "");
+        let err = check_source(&dir, &source("missing.toml"), &[]).unwrap_err().to_string();
+        let expected = format!("config file `{}` not found: ", dir.join("missing.toml").display());
+        assert!(err.starts_with(&expected), "{err}");
+    }
+
+    #[test]
+    fn unknown_extension_fails() {
+        let errors = check_file("config.ini", "a = 1", &parse_quote! { struct S {} });
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("unknown extension `.ini`"), "{errors:?}");
+    }
+
+    #[test]
+    fn check_false_skips_missing_file() {
+        let input = parse_quote! {
+            #[config(path = "does/not/exist.toml", check = false)]
+            struct S { port: u16 }
+        };
+        assert!(check(&plan::build(&input).unwrap()).is_ok());
+        assert!(check(&plan::build(&parse_quote! { struct S { port: u16 } }).unwrap()).is_ok());
+    }
+
+    #[cfg(feature = "toml")]
+    #[test]
+    fn malformed_toml_reports_line_and_col() {
+        let dir = manifest_dir("bad.toml", "a = 1\nb = = 2");
+        let err = check_source(&dir, &source("bad.toml"), &[]).unwrap_err().to_string();
+        assert!(err.starts_with(&format!("{}:2:5: ", dir.join("bad.toml").display())), "{err}");
+    }
+
+    #[cfg(feature = "toml")]
+    #[test]
+    fn valid_file_passes() {
+        let input = parse_quote! { struct S { host: String, port: u16, database: Database } };
+        let errors = check_file("ok.toml", "host = \"localhost\"\nport = 8080\n[database]\nurl = 1\n", &input);
+        assert_eq!(errors, NONE);
+    }
+
+    #[cfg(feature = "toml")]
+    #[test]
+    fn type_errors_in_file_fail() {
+        let input = parse_quote! { struct S { host: String, port: u16 } };
+        let errors = check_file("types.toml", "port = \"eighty\"\n", &input);
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        assert!(errors[0].ends_with("types.toml: missing required key `host`"), "{errors:?}");
+        assert!(errors[1].ends_with("types.toml: `port`: expected u16, found string"), "{errors:?}");
+    }
+
+    #[cfg(feature = "json")]
+    #[test]
+    fn explicit_format_overrides_extension() {
+        let mut source = source("config.txt");
+        source.format = Some(LitStr::new("json", proc_macro2::Span::call_site()));
+        let fields = plan::build(&parse_quote! { struct S { port: u16 } }).unwrap().fields;
+        let dir = manifest_dir("config.txt", r#"{"port": true}"#);
+        let err = check_source(&dir, &source, &fields).unwrap_err().to_string();
+        assert!(err.ends_with("`port`: expected u16, found bool"), "{err}");
     }
 }
