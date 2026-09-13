@@ -1,0 +1,5 @@
+error: ../../../../cfgy/tests/ui/fail/file_malformed_toml.toml:2:8: extra `=`, expected nothing
+ --> tests/ui/fail/file_malformed_toml.rs:4:17
+  |
+4 | #[config(path = "../../../../cfgy/tests/ui/fail/file_malformed_toml.toml")]
+  |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

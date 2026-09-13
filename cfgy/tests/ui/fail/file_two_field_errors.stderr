@@ -1,0 +1,11 @@
+error: ../../../../cfgy/tests/ui/fail/file_two_field_errors.toml: missing required key `host`
+ --> tests/ui/fail/file_two_field_errors.rs:5:17
+  |
+5 | #[config(path = "../../../../cfgy/tests/ui/fail/file_two_field_errors.toml")]
+  |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: ../../../../cfgy/tests/ui/fail/file_two_field_errors.toml: `port`: expected u16, found string
+ --> tests/ui/fail/file_two_field_errors.rs:5:17
+  |
+5 | #[config(path = "../../../../cfgy/tests/ui/fail/file_two_field_errors.toml")]
+  |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

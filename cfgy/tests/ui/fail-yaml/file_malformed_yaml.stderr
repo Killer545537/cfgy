@@ -1,0 +1,5 @@
+error: ../../../../cfgy/tests/ui/fail-yaml/file_malformed_yaml.yaml:3:1: while parsing a flow sequence, expected ',' or ']'
+ --> tests/ui/fail-yaml/file_malformed_yaml.rs:4:17
+  |
+4 | #[config(path = "../../../../cfgy/tests/ui/fail-yaml/file_malformed_yaml.yaml")]
+  |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

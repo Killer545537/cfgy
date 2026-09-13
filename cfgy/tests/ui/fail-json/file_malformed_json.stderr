@@ -1,0 +1,5 @@
+error: ../../../../cfgy/tests/ui/fail-json/file_malformed_json.json:4:1: trailing comma
+ --> tests/ui/fail-json/file_malformed_json.rs:4:17
+  |
+4 | #[config(path = "../../../../cfgy/tests/ui/fail-json/file_malformed_json.json")]
+  |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
