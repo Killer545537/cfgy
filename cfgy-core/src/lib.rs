@@ -9,8 +9,8 @@ mod path;
 mod shape;
 mod value;
 
-pub use error::ConfigError;
-pub use format::{Format, ParseError};
+pub use error::{ConfigError, Location};
+pub use format::{Format, ParseError, Parsed, Spans, line_col};
 pub use from_value::FromValue;
 pub use indexmap::IndexMap;
 pub use path::{PathStack, Segment};

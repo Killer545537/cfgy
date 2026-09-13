@@ -1,4 +1,4 @@
-use cfgy_core::{Format, IndexMap, ParseError, Value};
+use cfgy_core::{Format, IndexMap, ParseError, Parsed, Value};
 use saphyr::{LoadableYamlNode, Scalar, Yaml as Node};
 
 /// YAML 1.2, via `saphyr`.
@@ -13,12 +13,12 @@ impl Format for Yaml {
         "yaml"
     }
 
-    fn parse(&self, source: &str) -> Result<Value, ParseError> {
+    fn parse(&self, source: &str) -> Result<Parsed, ParseError> {
         let docs = Node::load_from_str(source).map_err(|err| ParseError {
             message: err.info().to_owned(),
             offset: byte_offset(source, err.marker().index()),
         })?;
-        docs.into_iter().next().map_or_else(|| Ok(Value::Map(IndexMap::new())), lower)
+        docs.into_iter().next().map_or_else(|| Ok(Value::Map(IndexMap::new())), lower).map(Parsed::from)
     }
 }
 
@@ -61,7 +61,7 @@ mod tests {
     use super::*;
 
     fn parse(source: &str) -> Value {
-        Yaml.parse(source).unwrap()
+        Yaml.parse(source).unwrap().value
     }
 
     #[test]

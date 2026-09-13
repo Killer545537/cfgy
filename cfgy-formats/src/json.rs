@@ -1,4 +1,4 @@
-use cfgy_core::{Format, ParseError, Value};
+use cfgy_core::{Format, ParseError, Parsed, Value};
 
 /// JSON, via `serde_json`.
 #[derive(Debug, Clone, Copy)]
@@ -9,7 +9,7 @@ impl Format for Json {
         "json"
     }
 
-    fn parse(&self, source: &str) -> Result<Value, ParseError> {
+    fn parse(&self, source: &str) -> Result<Parsed, ParseError> {
         let value = serde_json::from_str(source).map_err(|err| {
             let message = err.to_string();
             let location = format!(" at line {} column {}", err.line(), err.column());
@@ -18,7 +18,7 @@ impl Format for Json {
                 offset: offset(source, err.line(), err.column()),
             }
         })?;
-        lower(value)
+        lower(value).map(Parsed::from)
     }
 }
 
@@ -54,7 +54,7 @@ mod tests {
     use super::*;
 
     fn parse(source: &str) -> Value {
-        Json.parse(source).unwrap()
+        Json.parse(source).unwrap().value
     }
 
     #[test]

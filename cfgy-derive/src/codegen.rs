@@ -74,7 +74,7 @@ fn load_impl(plan: &StructPlan, source: &SourcePlan) -> TokenStream2 {
                         message: __cfgy_error.message,
                     },
                 )?;
-                Self::load_str(&__cfgy_source, __cfgy_format)
+                Self::load_str(&__cfgy_source, __cfgy_format).map_err(|__cfgy_error| __cfgy_error.in_file(__cfgy_path))
             }
 
             /// Parses `source` as `format` and converts it.
@@ -87,12 +87,17 @@ fn load_impl(plan: &StructPlan, source: &SourcePlan) -> TokenStream2 {
                 source: &str,
                 format: &dyn ::cfgy::Format,
             ) -> ::core::result::Result<Self, ::cfgy::ConfigError> {
-                let __cfgy_value = format.parse(source).map_err(|__cfgy_error| ::cfgy::ConfigError::Parse {
+                let __cfgy_parsed = format.parse(source).map_err(|__cfgy_error| ::cfgy::ConfigError::Parse {
                     format: format.name(),
-                    line_col: __cfgy_error.line_col(source),
+                    location: __cfgy_error.line_col(source).map(|(line, column)| ::cfgy::Location {
+                        file: ::core::option::Option::None,
+                        line,
+                        column,
+                    }),
                     message: __cfgy_error.message,
                 })?;
-                <Self as ::cfgy::FromValue>::from_value(&__cfgy_value, &mut ::cfgy::PathStack::new())
+                <Self as ::cfgy::FromValue>::from_value(&__cfgy_parsed.value, &mut ::cfgy::PathStack::new())
+                    .map_err(|__cfgy_error| __cfgy_error.locate(source, &__cfgy_parsed.spans))
             }
         }
     }

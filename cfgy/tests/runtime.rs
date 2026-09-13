@@ -120,7 +120,10 @@ fn unknown_extension_is_an_unknown_format_error() {
 #[test]
 fn malformed_source_is_a_parse_error_with_line_and_column() {
     let err = Settings::load_str("type = \"web\"\nport = = 1\n", &cfgy::Toml).unwrap_err();
-    assert!(matches!(err, ConfigError::Parse { format: "toml", line_col: Some((2, _)), .. }), "{err:?}");
+    assert!(
+        matches!(err, ConfigError::Parse { format: "toml", location: Some(cfgy::Location { line: 2, .. }), .. }),
+        "{err:?}"
+    );
 }
 
 const VALID_HEAD: &str = "type = \"web\"\nfeatures = {}\n";
@@ -139,7 +142,7 @@ fn nested_error_path_includes_the_index() {
 fn absent_nested_required_key_is_missing_with_its_full_path() {
     let source = format!("{VALID_HEAD}replicas = []\nserver = {{ host = \"a\" }}\n");
     let err = Settings::load_str(&source, &cfgy::Toml).unwrap_err();
-    assert!(matches!(err, ConfigError::Missing { ref path } if path == "server.port"), "{err:?}");
+    assert!(matches!(err, ConfigError::Missing { ref path, .. } if path == "server.port"), "{err:?}");
 }
 
 #[derive(FromConfig, Debug, PartialEq)]

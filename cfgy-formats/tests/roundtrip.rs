@@ -70,7 +70,7 @@ proptest! {
     fn toml(map in document(false)) {
         let text = to_toml(&map);
         let value = Value::Map(map);
-        prop_assert_eq!(cfgy_formats::Toml.parse(&text), Ok(value), "{}", text);
+        prop_assert_eq!(cfgy_formats::Toml.parse(&text).map(|parsed| parsed.value), Ok(value), "{}", text);
     }
 
     #[test]
@@ -78,7 +78,7 @@ proptest! {
     fn json(map in document(true)) {
         let value = Value::Map(map);
         let text = inline(&value, ": ");
-        prop_assert_eq!(cfgy_formats::Json.parse(&text), Ok(value), "{}", text);
+        prop_assert_eq!(cfgy_formats::Json.parse(&text).map(|parsed| parsed.value), Ok(value), "{}", text);
     }
 
     #[test]
@@ -86,6 +86,6 @@ proptest! {
     fn yaml(map in document(true)) {
         let value = Value::Map(map);
         let text = inline(&value, ": ");
-        prop_assert_eq!(cfgy_formats::Yaml.parse(&text), Ok(value), "{}", text);
+        prop_assert_eq!(cfgy_formats::Yaml.parse(&text).map(|parsed| parsed.value), Ok(value), "{}", text);
     }
 }

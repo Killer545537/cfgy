@@ -1,4 +1,4 @@
-use cfgy_core::{Datetime, Format, ParseError, Value};
+use cfgy_core::{Datetime, Format, ParseError, Parsed, Value};
 
 /// TOML, via the `toml` crate.
 #[derive(Debug, Clone, Copy)]
@@ -9,12 +9,12 @@ impl Format for Toml {
         "toml"
     }
 
-    fn parse(&self, source: &str) -> Result<Value, ParseError> {
+    fn parse(&self, source: &str) -> Result<Parsed, ParseError> {
         let table = source.parse::<::toml::Table>().map_err(|err| ParseError {
             message: err.message().to_owned(),
             offset: err.span().map(|span| span.start),
         })?;
-        Ok(lower_table(table))
+        Ok(lower_table(table).into())
     }
 }
 
@@ -39,7 +39,7 @@ mod tests {
     use super::*;
 
     fn parse(source: &str) -> Value {
-        Toml.parse(source).unwrap()
+        Toml.parse(source).unwrap().value
     }
 
     fn map(source: &str) -> cfgy_core::IndexMap<String, Value> {

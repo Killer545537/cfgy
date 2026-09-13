@@ -1,14 +1,30 @@
 use std::fmt;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Segment {
     Key(String),
     Index(usize),
 }
 
 /// Breadcrumbs from the root table to the value being converted, rendered as `database.replicas[2].port`.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct PathStack(Vec<Segment>);
+
+/// Compares against the rendered form, so `path == "database.port"` reads naturally in tests and matches.
+impl PartialEq<str> for PathStack {
+    fn eq(&self, other: &str) -> bool {
+        /// Consumes the expected text as the path renders, failing on the first difference.
+        struct Rest<'a>(&'a str);
+        impl fmt::Write for Rest<'_> {
+            fn write_str(&mut self, s: &str) -> fmt::Result {
+                self.0 = self.0.strip_prefix(s).ok_or(fmt::Error)?;
+                Ok(())
+            }
+        }
+        let mut rest = Rest(other);
+        fmt::write(&mut rest, format_args!("{self}")).is_ok() && rest.0.is_empty()
+    }
+}
 
 impl PathStack {
     #[must_use]
@@ -64,6 +80,13 @@ mod tests {
         });
         assert_eq!(rendered, "database.replicas[2].port");
         assert_eq!(path, PathStack::new());
+        path.with_key("a", |p| {
+            p.with_index(1, |p| {
+                assert_eq!(*p, *"a[1]");
+                assert_ne!(*p, *"a[1].b");
+                assert_ne!(*p, *"a");
+            });
+        });
     }
 
     #[test]

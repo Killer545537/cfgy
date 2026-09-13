@@ -1,4 +1,6 @@
-use crate::Value;
+use std::{collections::HashMap, ops::Range};
+
+use crate::{PathStack, Segment, Value};
 
 /// A strategy that lowers source text into a [`Value`].
 pub trait Format {
@@ -7,7 +9,37 @@ pub trait Format {
     /// # Errors
     ///
     /// Returns [`ParseError`] when `source` is not well-formed in this format.
-    fn parse(&self, source: &str) -> Result<Value, ParseError>;
+    fn parse(&self, source: &str) -> Result<Parsed, ParseError>;
+}
+
+/// The result of [`Format::parse`]: the value, and where each part of it sits in the source.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Parsed {
+    pub value: Value,
+    pub spans: Spans,
+}
+
+impl From<Value> for Parsed {
+    fn from(value: Value) -> Self {
+        Self { value, spans: Spans::default() }
+    }
+}
+
+/// Byte ranges of values in the source, keyed by their path from the root.
+///
+/// Kept beside [`Value`] rather than inside it, so conversion code never has to thread positions through.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Spans(HashMap<Vec<Segment>, Range<usize>>);
+
+impl Spans {
+    pub fn insert(&mut self, path: &PathStack, range: Range<usize>) {
+        self.0.insert(path.segments().to_vec(), range);
+    }
+
+    #[must_use]
+    pub fn get(&self, path: &[Segment]) -> Option<&Range<usize>> {
+        self.0.get(path)
+    }
 }
 
 /// A parse failure, with the byte offset into the source when the parser reports one.
@@ -18,16 +50,22 @@ pub struct ParseError {
 }
 
 impl ParseError {
-    /// 1-based `(line, column)` of [`Self::offset`] in `source`, with the column counted in chars.
-    ///
-    /// `None` when there is no offset or it does not land on a char boundary inside `source`.
+    /// 1-based `(line, column)` of [`Self::offset`] in `source`; see [`line_col`].
     #[must_use]
     pub fn line_col(&self, source: &str) -> Option<(usize, usize)> {
-        let before = source.get(..self.offset?)?;
-        let line = before.matches('\n').count().saturating_add(1);
-        let last_line = before.rsplit('\n').next().unwrap_or_default();
-        Some((line, last_line.chars().count().saturating_add(1)))
+        line_col(source, self.offset?)
     }
+}
+
+/// 1-based `(line, column)` of byte `offset` in `source`, with the column counted in chars.
+///
+/// `None` when `offset` does not land on a char boundary inside `source`.
+#[must_use]
+pub fn line_col(source: &str, offset: usize) -> Option<(usize, usize)> {
+    let before = source.get(..offset)?;
+    let line = before.matches('\n').count().saturating_add(1);
+    let last_line = before.rsplit('\n').next().unwrap_or_default();
+    Some((line, last_line.chars().count().saturating_add(1)))
 }
 
 #[cfg(test)]
@@ -54,5 +92,15 @@ mod tests {
         // "é" is two bytes but one column.
         assert_eq!(at(3, "é x"), Some((1, 3)));
         assert_eq!(at(1, "é x"), None);
+    }
+
+    #[test]
+    fn spans_by_path() {
+        let mut spans = Spans::default();
+        let mut path = PathStack::new();
+        path.with_key("server", |p| p.with_key("port", |p| spans.insert(p, 20..24)));
+        let key = |k: &str| Segment::Key(k.to_owned());
+        assert_eq!(spans.get(&[key("server"), key("port")]), Some(&(20..24)));
+        assert_eq!(spans.get(&[key("server")]), None);
     }
 }

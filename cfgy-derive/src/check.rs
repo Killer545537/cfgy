@@ -33,7 +33,7 @@ pub fn check_source(manifest_dir: &Path, source: &SourcePlan, fields: &[FieldPla
         fs::read_to_string(&resolved).map_err(|err| error(format!("cannot read config file `{file}`: {err}")))?;
     let format = cfgy_formats::select(source.format.as_ref().map(LitStr::value).as_deref(), &resolved, &text)
         .map_err(|err| error(format!("config file `{file}`: {err}")))?;
-    let value = format.parse(&text).map_err(|err| match err.line_col(&text) {
+    let value = format.parse(&text).map(|parsed| parsed.value).map_err(|err| match err.line_col(&text) {
         Some((line, col)) => error(format!("{file}:{line}:{col}: {}", err.message)),
         None => error(format!("{file}: {}", err.message)),
     })?;
