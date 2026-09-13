@@ -22,13 +22,18 @@ impl ::cfgy::FromValue for Settings {
                         )?
                 }
                 ::core::option::Option::None => {
-                    return ::core::result::Result::Err(
-                        __cfgy_path
-                            .with_key(
-                                "type",
-                                |__cfgy_path| ::cfgy::ConfigError::missing(__cfgy_path),
-                            ),
-                    );
+                    match <String as ::cfgy::FromValue>::from_missing() {
+                        ::core::option::Option::Some(__cfgy_missing) => __cfgy_missing,
+                        ::core::option::Option::None => {
+                            return ::core::result::Result::Err(
+                                __cfgy_path
+                                    .with_key(
+                                        "type",
+                                        |__cfgy_path| ::cfgy::ConfigError::missing(__cfgy_path),
+                                    ),
+                            );
+                        }
+                    }
                 }
             },
             server: match __cfgy_map.get("server") {
@@ -43,13 +48,18 @@ impl ::cfgy::FromValue for Settings {
                         )?
                 }
                 ::core::option::Option::None => {
-                    return ::core::result::Result::Err(
-                        __cfgy_path
-                            .with_key(
-                                "server",
-                                |__cfgy_path| ::cfgy::ConfigError::missing(__cfgy_path),
-                            ),
-                    );
+                    match <Server as ::cfgy::FromValue>::from_missing() {
+                        ::core::option::Option::Some(__cfgy_missing) => __cfgy_missing,
+                        ::core::option::Option::None => {
+                            return ::core::result::Result::Err(
+                                __cfgy_path
+                                    .with_key(
+                                        "server",
+                                        |__cfgy_path| ::cfgy::ConfigError::missing(__cfgy_path),
+                                    ),
+                            );
+                        }
+                    }
                 }
             },
             replicas: match __cfgy_map.get("replicas") {
@@ -66,32 +76,47 @@ impl ::cfgy::FromValue for Settings {
                         )?
                 }
                 ::core::option::Option::None => {
-                    return ::core::result::Result::Err(
-                        __cfgy_path
-                            .with_key(
-                                "replicas",
-                                |__cfgy_path| ::cfgy::ConfigError::missing(__cfgy_path),
-                            ),
-                    );
+                    match <Vec<Server> as ::cfgy::FromValue>::from_missing() {
+                        ::core::option::Option::Some(__cfgy_missing) => __cfgy_missing,
+                        ::core::option::Option::None => {
+                            return ::core::result::Result::Err(
+                                __cfgy_path
+                                    .with_key(
+                                        "replicas",
+                                        |__cfgy_path| ::cfgy::ConfigError::missing(__cfgy_path),
+                                    ),
+                            );
+                        }
+                    }
                 }
             },
             description: match __cfgy_map.get("description") {
-                ::core::option::Option::Some(::cfgy::Value::Null) => {
-                    ::core::option::Option::None
-                }
                 ::core::option::Option::Some(__cfgy_field) => {
-                    ::core::option::Option::Some(
-                        __cfgy_path
-                            .with_key(
-                                "description",
-                                |__cfgy_path| <String as ::cfgy::FromValue>::from_value(
-                                    __cfgy_field,
-                                    __cfgy_path,
-                                ),
-                            )?,
-                    )
+                    __cfgy_path
+                        .with_key(
+                            "description",
+                            |__cfgy_path| <Option<
+                                String,
+                            > as ::cfgy::FromValue>::from_value(
+                                __cfgy_field,
+                                __cfgy_path,
+                            ),
+                        )?
                 }
-                ::core::option::Option::None => ::core::option::Option::None,
+                ::core::option::Option::None => {
+                    match <Option<String> as ::cfgy::FromValue>::from_missing() {
+                        ::core::option::Option::Some(__cfgy_missing) => __cfgy_missing,
+                        ::core::option::Option::None => {
+                            return ::core::result::Result::Err(
+                                __cfgy_path
+                                    .with_key(
+                                        "description",
+                                        |__cfgy_path| ::cfgy::ConfigError::missing(__cfgy_path),
+                                    ),
+                            );
+                        }
+                    }
+                }
             },
             timeout_secs: match __cfgy_map.get("timeout_secs") {
                 ::core::option::Option::Some(__cfgy_field) => {

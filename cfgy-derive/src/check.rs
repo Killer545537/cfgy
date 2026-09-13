@@ -56,11 +56,13 @@ pub fn check_fields(fields: &[FieldPlan], root: &Value) -> Vec<String> {
     };
     let mut errors = Vec::new();
     for field in fields {
+        let optional = option_inner(&field.ty);
+        let required = optional.is_none() && field.default.is_none();
         path.with_key(&field.key, |path| match map.get(&field.key) {
-            None if field.required() => errors.push(ConfigError::missing(path).to_string()),
-            Some(Value::Null) if field.optional.is_some() => {}
+            None if required => errors.push(ConfigError::missing(path).to_string()),
+            Some(Value::Null) if optional.is_some() => {}
             None => {}
-            Some(value) => check_type(field.optional.as_ref().unwrap_or(&field.ty), value, path, &mut errors),
+            Some(value) => check_type(optional.unwrap_or(&field.ty), value, path, &mut errors),
         });
     }
     errors
@@ -155,6 +157,30 @@ fn check_type(ty: &Type, value: &Value, path: &mut PathStack, errors: &mut Vec<S
                 push(Err(ConfigError::type_mismatch(path, "table", value)));
             }
         }
+    }
+}
+
+/// Returns `T` if `ty` is syntactically `Option<T>`, `std::option::Option<T>` or `core::option::Option<T>`.
+///
+/// ponytail: syntactic, so `type MaybePort = Option<u16>` counts as required here even though it loads fine; goes
+/// away when this check is rebuilt on `FromValue::SHAPE`.
+fn option_inner(ty: &Type) -> Option<&Type> {
+    let path = match ty {
+        Type::Group(group) => return option_inner(&group.elem),
+        Type::Path(type_path) if type_path.qself.is_none() => &type_path.path,
+        _ => return None,
+    };
+    let idents: Vec<String> = path.segments.iter().map(|segment| segment.ident.to_string()).collect();
+    let idents: Vec<&str> = idents.iter().map(String::as_str).collect();
+    let prefix_is_bare = path.segments.iter().rev().skip(1).all(|segment| segment.arguments.is_none());
+    if !prefix_is_bare || !matches!(idents.as_slice(), ["Option"] | ["std" | "core", "option", "Option"]) {
+        return None;
+    }
+    let PathArguments::AngleBracketed(generics) = &path.segments.last()?.arguments else { return None };
+    let mut args = generics.args.iter();
+    match (args.next(), args.next()) {
+        (Some(GenericArgument::Type(inner)), None) => Some(inner),
+        _ => None,
     }
 }
 
@@ -314,6 +340,20 @@ mod tests {
         let input = parse_quote! { struct S { host: String, port: u16 } };
         let errors = errors(&input, &map(&[("host", Value::Int(1)), ("port", Value::Bool(true))]));
         assert_eq!(errors, ["`host`: expected string, found integer", "`port`: expected u16, found bool"]);
+    }
+
+    #[test]
+    fn peels_option() {
+        let peeled = |ty: Type| option_inner(&ty).cloned();
+        let u8_ty: Type = parse_quote!(u8);
+        let vec_ty: Type = parse_quote!(Vec<u8>);
+        assert_eq!(peeled(parse_quote!(Option<u8>)), Some(u8_ty.clone()));
+        assert_eq!(peeled(parse_quote!(std::option::Option<u8>)), Some(u8_ty.clone()));
+        assert_eq!(peeled(parse_quote!(::core::option::Option<u8>)), Some(u8_ty));
+        assert_eq!(peeled(parse_quote!(Option<Vec<u8>>)), Some(vec_ty));
+        assert_eq!(peeled(parse_quote!(Vec<Option<u8>>)), None);
+        assert_eq!(peeled(parse_quote!(u8)), None);
+        assert_eq!(peeled(parse_quote!(foo::Option<u8>)), None);
     }
 
     #[test]

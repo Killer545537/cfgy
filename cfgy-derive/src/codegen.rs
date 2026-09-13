@@ -2,7 +2,7 @@
 
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
-use syn::{LitStr, Type};
+use syn::LitStr;
 
 use crate::plan::{FieldDefault, FieldPlan, SourcePlan, StructPlan};
 
@@ -103,43 +103,32 @@ fn load_impl(plan: &StructPlan, source: &SourcePlan) -> TokenStream2 {
     }
 }
 
-/// `ident: <lookup>,` for one field, following the design's absent/optional/default/required order.
+/// `ident: <lookup>,` for one field: a present value converts; an absent key takes the `default` if one is given,
+/// else `FromValue::from_missing` (so `Option` and aliases of it are optional), else is a missing-key error.
 fn field_init(field: &FieldPlan) -> TokenStream2 {
-    let FieldPlan { ident, key, key_span, ty, optional, default, .. } = field;
+    let FieldPlan { ident, key, key_span, ty, default } = field;
     let key = LitStr::new(key, *key_span);
-    let convert = |ty: &Type| {
-        quote! {
-            __cfgy_path.with_key(#key, |__cfgy_path| <#ty as ::cfgy::FromValue>::from_value(__cfgy_field, __cfgy_path))?
-        }
-    };
-    let present = optional.as_ref().map_or_else(
-        || {
-            let convert = convert(ty);
-            quote! { ::core::option::Option::Some(__cfgy_field) => #convert, }
-        },
-        |inner| {
-            let convert = convert(inner);
-            quote! {
-                ::core::option::Option::Some(::cfgy::Value::Null) => ::core::option::Option::None,
-                ::core::option::Option::Some(__cfgy_field) => ::core::option::Option::Some(#convert),
-            }
-        },
-    );
-    // A default wins over `None` so `#[config(default = ...)]` on an `Option` field is not silently ignored.
     let absent = match default {
         Some(FieldDefault::Trait) => quote! { ::core::default::Default::default() },
         // `DefaultFrom` lets `default = "localhost"` fill a `String` while integer literals still infer the field type.
         Some(FieldDefault::Expr(expr)) => quote! { <#ty as ::cfgy::__private::DefaultFrom<_>>::default_from(#expr) },
-        None if field.required() => quote! {
-            return ::core::result::Result::Err(
-                __cfgy_path.with_key(#key, |__cfgy_path| ::cfgy::ConfigError::missing(__cfgy_path)),
-            )
+        None => quote! {
+            match <#ty as ::cfgy::FromValue>::from_missing() {
+                ::core::option::Option::Some(__cfgy_missing) => __cfgy_missing,
+                ::core::option::Option::None => {
+                    return ::core::result::Result::Err(
+                        __cfgy_path.with_key(#key, |__cfgy_path| ::cfgy::ConfigError::missing(__cfgy_path)),
+                    );
+                }
+            }
         },
-        None => quote! { ::core::option::Option::None },
     };
     quote! {
         #ident: match __cfgy_map.get(#key) {
-            #present
+            ::core::option::Option::Some(__cfgy_field) => __cfgy_path.with_key(
+                #key,
+                |__cfgy_path| <#ty as ::cfgy::FromValue>::from_value(__cfgy_field, __cfgy_path),
+            )?,
             ::core::option::Option::None => #absent,
         },
     }
@@ -169,9 +158,12 @@ mod tests {
         assert!(out.contains("impl :: cfgy :: FromValue for Settings"), "{out}");
         assert!(out.contains("__cfgy_map . get (\"type\")"), "{out}");
         assert!(out.contains("< String as :: cfgy :: FromValue >"), "{out}");
-        assert!(out.contains(":: cfgy :: Value :: Null"), "{out}");
+        assert!(out.contains("< Option < String > as :: cfgy :: FromValue > :: from_value"), "{out}");
+        assert!(!out.contains("Value :: Null"), "{out}");
         assert!(out.contains("< u16 as :: cfgy :: __private :: DefaultFrom < _ >> :: default_from (8080)"), "{out}");
-        assert_eq!(out.matches("ConfigError :: missing").count(), 1, "{out}");
+        // Only the fields without a default fall back to `from_missing`.
+        assert_eq!(out.matches("from_missing").count(), 2, "{out}");
+        assert_eq!(out.matches("ConfigError :: missing").count(), 2, "{out}");
     }
 
     #[test]

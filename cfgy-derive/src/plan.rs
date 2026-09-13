@@ -3,10 +3,7 @@
 use proc_macro2::Span;
 use syn::ext::IdentExt;
 use syn::meta::ParseNestedMeta;
-use syn::{
-    Attribute, Data, DeriveInput, Error, Expr, Fields, GenericArgument, Generics, Ident, LitBool, LitStr,
-    PathArguments, Token, Type,
-};
+use syn::{Attribute, Data, DeriveInput, Error, Expr, Fields, Generics, Ident, LitBool, LitStr, Token, Type};
 
 /// Everything codegen needs to know about a derived struct.
 pub struct StructPlan {
@@ -31,8 +28,7 @@ pub struct FieldPlan {
     pub key: String,
     pub key_span: Span,
     pub ty: Type,
-    /// `Some(inner)` when the field is `Option<inner>`.
-    pub optional: Option<Type>,
+    /// Used for an absent key; without one, the type's `FromValue::from_missing` decides.
     pub default: Option<FieldDefault>,
 }
 
@@ -42,13 +38,6 @@ pub enum FieldDefault {
     Trait,
     /// `default = <expr>`, converted into the field type through `DefaultFrom`.
     Expr(Expr),
-}
-
-impl FieldPlan {
-    /// A key absent from the config is an error only for required fields.
-    pub const fn required(&self) -> bool {
-        self.optional.is_none() && self.default.is_none()
-    }
 }
 
 /// Builds the plan for `input`, rejecting shapes the derive does not support.
@@ -90,14 +79,7 @@ pub fn build(input: &DeriveInput) -> syn::Result<StructPlan> {
             error.combine(Error::new(first.key_span, "first used here"));
             errors.push(error);
         }
-        plans.push(FieldPlan {
-            ident,
-            key,
-            key_span,
-            ty: field.ty.clone(),
-            optional: option_inner(&field.ty).cloned(),
-            default: options.default,
-        });
+        plans.push(FieldPlan { ident, key, key_span, ty: field.ty.clone(), default: options.default });
     }
 
     if let Some(error) = errors.into_iter().reduce(|mut acc, error| {
@@ -216,27 +198,6 @@ fn source_plan(options: Options, errors: &mut Vec<Error>) -> Option<SourcePlan> 
         format: options.format.map(|(_, format)| format),
         check: options.check.is_none_or(|(_, check)| check.value),
     })
-}
-
-/// Returns `T` if `ty` is syntactically `Option<T>`, `std::option::Option<T>` or `core::option::Option<T>`.
-fn option_inner(ty: &Type) -> Option<&Type> {
-    let path = match ty {
-        Type::Group(group) => return option_inner(&group.elem),
-        Type::Path(type_path) if type_path.qself.is_none() => &type_path.path,
-        _ => return None,
-    };
-    let idents: Vec<String> = path.segments.iter().map(|segment| segment.ident.to_string()).collect();
-    let idents: Vec<&str> = idents.iter().map(String::as_str).collect();
-    let prefix_is_bare = path.segments.iter().rev().skip(1).all(|segment| segment.arguments.is_none());
-    if !prefix_is_bare || !matches!(idents.as_slice(), ["Option"] | ["std" | "core", "option", "Option"]) {
-        return None;
-    }
-    let PathArguments::AngleBracketed(generics) = &path.segments.last()?.arguments else { return None };
-    let mut args = generics.args.iter();
-    match (args.next(), args.next()) {
-        (Some(GenericArgument::Type(inner)), None) => Some(inner),
-        _ => None,
-    }
 }
 
 #[cfg(test)]
@@ -469,47 +430,6 @@ mod tests {
             }
         });
         assert_eq!(errors, ["duplicate config key `port`", "first used here"]);
-    }
-
-    #[test]
-    fn peels_option() {
-        let plan = build(&parse_quote! {
-            struct S {
-                a: Option<u8>,
-                b: std::option::Option<u8>,
-                c: ::core::option::Option<u8>,
-                d: Option<Vec<u8>>,
-                e: Vec<Option<u8>>,
-                f: u8,
-                g: foo::Option<u8>,
-            }
-        })
-        .unwrap();
-        let u8_ty: Type = parse_quote!(u8);
-        let vec_ty: Type = parse_quote!(Vec<u8>);
-        assert_eq!(field(&plan, "a").optional.as_ref(), Some(&u8_ty));
-        assert_eq!(field(&plan, "b").optional.as_ref(), Some(&u8_ty));
-        assert_eq!(field(&plan, "c").optional.as_ref(), Some(&u8_ty));
-        assert_eq!(field(&plan, "d").optional.as_ref(), Some(&vec_ty));
-        assert!(field(&plan, "e").optional.is_none());
-        assert!(field(&plan, "f").optional.is_none());
-        assert!(field(&plan, "g").optional.is_none());
-    }
-
-    #[test]
-    fn required_only_without_option_or_default() {
-        let plan = build(&parse_quote! {
-            struct S {
-                a: u8,
-                b: Option<u8>,
-                #[config(default = 1)]
-                c: u8,
-            }
-        })
-        .unwrap();
-        assert!(field(&plan, "a").required());
-        assert!(!field(&plan, "b").required());
-        assert!(!field(&plan, "c").required());
     }
 
     #[test]
