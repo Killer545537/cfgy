@@ -17,7 +17,7 @@ pub enum ConfigError {
     /// A value has the wrong type.
     Type { path: String, expected: &'static str, found: &'static str },
     /// An integer does not fit the target type.
-    OutOfRange { path: String, value: i64, target: &'static str },
+    OutOfRange { path: String, value: i128, target: &'static str },
     /// A sequence has the wrong length for a tuple.
     Length { path: String, expected: usize, found: usize },
 }
@@ -34,7 +34,7 @@ impl ConfigError {
     }
 
     #[must_use]
-    pub fn out_of_range(path: &PathStack, value: i64, target: &'static str) -> Self {
+    pub fn out_of_range(path: &PathStack, value: i128, target: &'static str) -> Self {
         Self::OutOfRange { path: path.to_string(), value, target }
     }
 

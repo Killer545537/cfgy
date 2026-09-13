@@ -8,7 +8,7 @@ use proptest::prelude::*;
 fn document(null: bool) -> impl Strategy<Value = IndexMap<String, Value>> {
     let leaf = prop_oneof![
         any::<bool>().prop_map(Value::Bool),
-        any::<i64>().prop_map(Value::Int),
+        any::<i64>().prop_map(|i| Value::Int(i.into())),
         {
             use proptest::num::f64::{NEGATIVE, NORMAL, POSITIVE, SUBNORMAL, ZERO};
             (POSITIVE | NEGATIVE | NORMAL | SUBNORMAL | ZERO).prop_map(Value::Float)

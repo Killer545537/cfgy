@@ -33,10 +33,13 @@ fn lower(value: serde_json::Value) -> Result<Value, ParseError> {
         serde_json::Value::Null => Value::Null,
         serde_json::Value::Bool(b) => Value::Bool(b),
         // ponytail: serde_json reads integers above u64::MAX as f64, so those arrive as Float, not an error.
-        serde_json::Value::Number(n) => match (n.as_i64(), n.as_f64()) {
-            (Some(i), _) => Value::Int(i),
-            (None, Some(f)) if !n.is_u64() => Value::Float(f),
-            _ => return Err(ParseError { message: format!("integer {n} is out of range for i64"), offset: None }),
+        serde_json::Value::Number(n) => match (n.as_i64(), n.as_u64(), n.as_f64()) {
+            (Some(i), _, _) => Value::Int(i.into()),
+            (None, Some(u), _) => Value::Int(u.into()),
+            (None, None, Some(f)) => Value::Float(f),
+            (None, None, None) => {
+                return Err(ParseError { message: format!("number {n} is not representable"), offset: None });
+            }
         },
         serde_json::Value::String(s) => Value::Str(s),
         serde_json::Value::Array(items) => Value::Seq(items.into_iter().map(lower).collect::<Result<_, _>>()?),
@@ -60,8 +63,10 @@ mod tests {
         assert_eq!(parse("-1"), Value::Int(-1));
         assert_eq!(parse("8080.0"), Value::Float(8080.0));
         assert_eq!(parse("1e3"), Value::Float(1000.0));
-        let err = Json.parse("18446744073709551615").unwrap_err();
-        assert_eq!(err.message, "integer 18446744073709551615 is out of range for i64");
+        assert_eq!(parse("18446744073709551615"), Value::Int(i128::from(u64::MAX)));
+        assert_eq!(parse("-9223372036854775808"), Value::Int(i128::from(i64::MIN)));
+        // Above u64::MAX serde_json yields a float, as serde does.
+        assert_eq!(parse("18446744073709551616"), Value::Float(18_446_744_073_709_551_616.0));
     }
 
     #[test]

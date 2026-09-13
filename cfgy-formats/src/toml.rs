@@ -25,7 +25,7 @@ fn lower_table(table: ::toml::Table) -> Value {
 fn lower(value: ::toml::Value) -> Value {
     match value {
         ::toml::Value::String(s) => Value::Str(s),
-        ::toml::Value::Integer(i) => Value::Int(i),
+        ::toml::Value::Integer(i) => Value::Int(i128::from(i)),
         ::toml::Value::Float(f) => Value::Float(f),
         ::toml::Value::Boolean(b) => Value::Bool(b),
         ::toml::Value::Datetime(d) => Value::Datetime(Datetime(d.to_string())),

@@ -33,7 +33,7 @@ fn lower(node: Node<'_>) -> Result<Value, ParseError> {
     Ok(match node {
         Node::Value(Scalar::Null) => Value::Null,
         Node::Value(Scalar::Boolean(b)) => Value::Bool(b),
-        Node::Value(Scalar::Integer(i)) => Value::Int(i),
+        Node::Value(Scalar::Integer(i)) => Value::Int(i128::from(i)),
         Node::Value(Scalar::FloatingPoint(f)) => Value::Float(f.0),
         Node::Value(Scalar::String(s)) => Value::Str(s.into_owned()),
         Node::Sequence(items) => Value::Seq(items.into_iter().map(lower).collect::<Result<_, _>>()?),

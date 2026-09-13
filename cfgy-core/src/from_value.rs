@@ -216,10 +216,14 @@ mod tests {
 
     #[test]
     fn integers() {
-        assert!(matches!(conv::<u16>(&Value::Int(i64::MAX)), Err(ConfigError::OutOfRange { target: "u16", .. })));
+        assert!(matches!(
+            conv::<u16>(&Value::Int(i128::from(i64::MAX))),
+            Err(ConfigError::OutOfRange { target: "u16", .. })
+        ));
         assert!(matches!(conv::<u32>(&Value::Int(-1)), Err(ConfigError::OutOfRange { value: -1, .. })));
-        assert_eq!(conv::<u16>(&Value::Int(i64::from(u16::MAX))).unwrap(), u16::MAX);
-        assert_eq!(conv::<i128>(&Value::Int(i64::MIN)).unwrap(), i128::from(i64::MIN));
+        assert_eq!(conv::<u16>(&Value::Int(i128::from(u16::MAX))).unwrap(), u16::MAX);
+        assert_eq!(conv::<i128>(&Value::Int(i128::MIN)).unwrap(), i128::MIN);
+        assert_eq!(conv::<u64>(&Value::Int(i128::from(u64::MAX))).unwrap(), u64::MAX);
         assert!(matches!(
             conv::<i32>(&Value::Float(1.0)),
             Err(ConfigError::Type { expected: "i32", found: "float", .. })
@@ -231,7 +235,10 @@ mod tests {
     fn floats() {
         assert!((conv::<f64>(&Value::Float(1.5)).unwrap() - 1.5).abs() < f64::EPSILON);
         assert!((conv::<f64>(&Value::Int(-3)).unwrap() + 3.0).abs() < f64::EPSILON);
-        assert!(matches!(conv::<f64>(&Value::Int(i64::MAX)), Err(ConfigError::OutOfRange { target: "f64", .. })));
+        assert!(matches!(
+            conv::<f64>(&Value::Int(i128::from(i64::MAX))),
+            Err(ConfigError::OutOfRange { target: "f64", .. })
+        ));
         assert!(matches!(conv::<f64>(&Value::Str("1.0".into())), Err(ConfigError::Type { found: "string", .. })));
         assert!((conv::<f32>(&Value::Float(0.1)).unwrap() - 0.1).abs() < f32::EPSILON);
         assert!((conv::<f32>(&Value::Int(7)).unwrap() - 7.0).abs() < f32::EPSILON);

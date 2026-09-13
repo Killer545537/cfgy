@@ -11,7 +11,7 @@ pub struct Datetime(pub String);
 pub enum Value {
     Null,
     Bool(bool),
-    Int(i64),
+    Int(i128),
     Float(f64),
     Str(String),
     Seq(Vec<Self>),
