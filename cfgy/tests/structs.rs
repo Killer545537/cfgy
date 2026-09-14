@@ -77,3 +77,71 @@ fn null_into_a_required_field_is_a_type_error() {
     let err = load::<Optionals>(&value).unwrap_err();
     assert!(matches!(err, ConfigError::Type { ref path, expected: "u16", .. } if path == "port"), "{err:?}");
 }
+
+#[derive(FromConfig, Debug, PartialEq)]
+struct Port(u16);
+
+#[derive(FromConfig, Debug, PartialEq)]
+struct MaybeLevel(Option<u8>);
+
+#[derive(FromConfig, Debug, PartialEq)]
+struct Endpoint(String, Port);
+
+#[derive(FromConfig, Debug, PartialEq)]
+struct Marker;
+
+#[derive(FromConfig, Debug, PartialEq)]
+struct Shapes {
+    port: Port,
+    level: MaybeLevel,
+    endpoint: Endpoint,
+    marker: Option<Marker>,
+}
+
+#[test]
+fn newtype_is_transparent() {
+    assert_eq!(load::<Port>(&Value::Int(8080)).unwrap(), Port(8080));
+    let err = load::<Port>(&Value::Int(70_000)).unwrap_err();
+    assert!(matches!(err, ConfigError::OutOfRange { target: "u16", .. }), "{err:?}");
+    assert_eq!(Port::from_missing(), None);
+    assert_eq!(MaybeLevel::from_missing(), Some(MaybeLevel(None)));
+}
+
+#[test]
+fn tuple_struct_reads_an_exact_length_sequence() {
+    let pair = Value::Seq(vec![Value::Str("a".to_owned()), Value::Int(1)]);
+    assert_eq!(load::<Endpoint>(&pair).unwrap(), Endpoint("a".to_owned(), Port(1)));
+
+    let err = load::<Endpoint>(&Value::Seq(vec![Value::Str("a".to_owned())])).unwrap_err();
+    assert!(matches!(err, ConfigError::Length { expected: 2, found: 1, .. }), "{err:?}");
+    let err = load::<Endpoint>(&table(&[])).unwrap_err();
+    assert!(matches!(err, ConfigError::Type { expected: "sequence", found: "table", .. }), "{err:?}");
+    let bad = Value::Seq(vec![Value::Str("a".to_owned()), Value::Str("b".to_owned())]);
+    let err = load::<Endpoint>(&bad).unwrap_err();
+    assert!(matches!(err, ConfigError::Type { ref path, expected: "u16", .. } if path == "[1]"), "{err:?}");
+}
+
+#[test]
+fn unit_struct_reads_null() {
+    assert_eq!(load::<Marker>(&Value::Null).unwrap(), Marker);
+    let err = load::<Marker>(&Value::Bool(true)).unwrap_err();
+    assert!(matches!(err, ConfigError::Type { expected: "null", found: "bool", .. }), "{err:?}");
+}
+
+#[test]
+fn struct_kinds_nest_inside_named_structs() {
+    let value = table(&[
+        ("port", Value::Int(80)),
+        ("endpoint", Value::Seq(vec![Value::Str("h".to_owned()), Value::Int(81)])),
+        ("marker", Value::Null),
+    ]);
+    let shapes: Shapes = load(&value).unwrap();
+    assert_eq!(
+        shapes,
+        Shapes { port: Port(80), level: MaybeLevel(None), endpoint: Endpoint("h".to_owned(), Port(81)), marker: None }
+    );
+
+    let value = table(&[("endpoint", Value::Seq(vec![Value::Str("h".to_owned()), Value::Int(81)]))]);
+    let err = load::<Shapes>(&value).unwrap_err();
+    assert!(matches!(err, ConfigError::Missing { ref path, .. } if path == "port"), "{err:?}");
+}

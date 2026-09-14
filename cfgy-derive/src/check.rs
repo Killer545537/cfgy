@@ -6,7 +6,7 @@ use std::{env, fs};
 use cfgy_core::{ConfigError, Datetime, FromValue, PathStack, Value};
 use syn::{GenericArgument, LitStr, PathArguments, PathSegment, Type};
 
-use crate::plan::{FieldPlan, SourcePlan, StructPlan};
+use crate::plan::{FieldPlan, SourcePlan, StructKind, StructPlan};
 
 /// Reads, parses, and type-checks the config file of `plan`, unless it has no `path` or sets `check = false`.
 ///
@@ -15,9 +15,11 @@ pub fn check(plan: &StructPlan) -> syn::Result<Option<PathBuf>> {
     let Some(source) = plan.source.as_ref().filter(|source| source.check) else {
         return Ok(None);
     };
+    // The plan rejects `path` on any other kind of struct.
+    let StructKind::Named(fields) = &plan.kind else { return Ok(None) };
     let manifest_dir = env::var_os("CARGO_MANIFEST_DIR")
         .ok_or_else(|| syn::Error::new(source.path.span(), "`CARGO_MANIFEST_DIR` is not set"))?;
-    check_source(Path::new(&manifest_dir), source, &plan.fields).map(Some)
+    check_source(Path::new(&manifest_dir), source, fields).map(Some)
 }
 
 /// Checks the file `source` points at, relative to `manifest_dir`, with every error spanned on its `path` literal.
@@ -215,8 +217,15 @@ mod tests {
         Value::Map(entries.iter().map(|(k, v)| ((*k).to_owned(), v.clone())).collect::<IndexMap<_, _>>())
     }
 
+    fn named(plan: StructPlan) -> Vec<FieldPlan> {
+        match plan.kind {
+            StructKind::Named(fields) => fields,
+            _ => panic!("expected a struct with named fields"),
+        }
+    }
+
     fn errors(input: &DeriveInput, root: &Value) -> Vec<String> {
-        check_fields(&plan::build(input).unwrap().fields, root)
+        check_fields(&named(plan::build(input).unwrap()), root)
     }
 
     fn one_error(input: &DeriveInput, root: &Value) -> String {
@@ -238,7 +247,7 @@ mod tests {
     }
 
     fn check_file(name: &str, contents: &str, input: &DeriveInput) -> Vec<String> {
-        let fields = plan::build(input).unwrap().fields;
+        let fields = named(plan::build(input).unwrap());
         match check_source(&manifest_dir(name, contents), &source(name), &fields) {
             Ok(_) => Vec::new(),
             Err(err) => err.into_iter().map(|err| err.to_string()).collect(),
@@ -395,7 +404,7 @@ mod tests {
         let errors = check_file("ok.toml", "host = \"localhost\"\nport = 8080\n[database]\nurl = 1\n", &input);
         assert_eq!(errors, NONE);
         let dir = manifest_dir("ok.toml", "host = \"a\"\nport = 1\n[database]\n");
-        let fields = plan::build(&input).unwrap().fields;
+        let fields = named(plan::build(&input).unwrap());
         assert_eq!(check_source(&dir, &source("ok.toml"), &fields).unwrap(), dir.join("ok.toml"));
     }
 
@@ -414,7 +423,7 @@ mod tests {
     fn explicit_format_overrides_extension() {
         let mut source = source("config.txt");
         source.format = Some(LitStr::new("json", proc_macro2::Span::call_site()));
-        let fields = plan::build(&parse_quote! { struct S { port: u16 } }).unwrap().fields;
+        let fields = named(plan::build(&parse_quote! { struct S { port: u16 } }).unwrap());
         let dir = manifest_dir("config.txt", r#"{"port": true}"#);
         let err = check_source(&dir, &source, &fields).unwrap_err().to_string();
         assert!(err.ends_with("`port`: expected u16, found bool"), "{err}");

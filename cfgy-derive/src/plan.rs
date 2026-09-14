@@ -11,7 +11,17 @@ pub struct StructPlan {
     pub generics: Generics,
     /// `Some` if and only if `#[config(path = "...")]` is present.
     pub source: Option<SourcePlan>,
-    pub fields: Vec<FieldPlan>,
+    pub kind: StructKind,
+}
+
+/// The field layout of the derived struct.
+pub enum StructKind {
+    /// `struct S { .. }`: reads a table.
+    Named(Vec<FieldPlan>),
+    /// `struct S(A, B)`: reads a sequence of exactly this many items, except that one field is a transparent newtype.
+    Tuple(Vec<Type>),
+    /// `struct S;`: reads null.
+    Unit,
 }
 
 /// The struct-level `#[config(path, format, check)]` options.
@@ -43,15 +53,7 @@ pub enum FieldDefault {
 /// Builds the plan for `input`, rejecting shapes the derive does not support.
 pub fn build(input: &DeriveInput) -> syn::Result<StructPlan> {
     let fields = match &input.data {
-        Data::Struct(data) => match &data.fields {
-            Fields::Named(fields) => &fields.named,
-            Fields::Unnamed(fields) => {
-                return Err(Error::new_spanned(fields, "`FromConfig` cannot be derived for tuple structs"));
-            }
-            Fields::Unit => {
-                return Err(Error::new(input.ident.span(), "`FromConfig` cannot be derived for unit structs"));
-            }
-        },
+        Data::Struct(data) => &data.fields,
         Data::Enum(data) => {
             return Err(Error::new(data.enum_token.span, "`FromConfig` can only be derived for structs, not enums"));
         }
@@ -67,10 +69,31 @@ pub fn build(input: &DeriveInput) -> syn::Result<StructPlan> {
     let mut errors = Vec::new();
     let source = source_plan(parse_options(&input.attrs, Site::Struct, &mut errors), &mut errors);
 
-    let mut plans: Vec<FieldPlan> = Vec::with_capacity(fields.len());
+    let kind = match fields {
+        Fields::Named(fields) => StructKind::Named(named_fields(&fields.named, &mut errors)),
+        Fields::Unnamed(fields) => StructKind::Tuple(tuple_fields(&fields.unnamed, &mut errors)),
+        Fields::Unit => StructKind::Unit,
+    };
+    if let (Some(source), StructKind::Tuple(_) | StructKind::Unit) = (&source, &kind) {
+        errors.push(Error::new(source.path.span(), "`path` requires a struct with named fields"));
+    }
+
+    if let Some(error) = errors.into_iter().reduce(|mut acc, error| {
+        acc.combine(error);
+        acc
+    }) {
+        return Err(error);
+    }
+
+    Ok(StructPlan { ident: input.ident.clone(), generics: input.generics.clone(), source, kind })
+}
+
+/// Plans each named field, pushing option errors and keys used twice onto `errors`.
+fn named_fields<'a>(fields: impl IntoIterator<Item = &'a syn::Field>, errors: &mut Vec<Error>) -> Vec<FieldPlan> {
+    let mut plans: Vec<FieldPlan> = Vec::new();
     for field in fields {
         let Some(ident) = field.ident.clone() else { continue };
-        let options = parse_options(&field.attrs, Site::Field, &mut errors);
+        let options = parse_options(&field.attrs, Site::Field, errors);
         let (key, key_span) = options
             .rename
             .map_or_else(|| (ident.unraw().to_string(), ident.span()), |rename| (rename.value(), rename.span()));
@@ -81,15 +104,19 @@ pub fn build(input: &DeriveInput) -> syn::Result<StructPlan> {
         }
         plans.push(FieldPlan { ident, key, key_span, ty: field.ty.clone(), default: options.default });
     }
+    plans
+}
 
-    if let Some(error) = errors.into_iter().reduce(|mut acc, error| {
-        acc.combine(error);
-        acc
-    }) {
-        return Err(error);
+/// The types of a tuple struct's fields; `config` attributes on them are pushed onto `errors`.
+fn tuple_fields<'a>(fields: impl IntoIterator<Item = &'a syn::Field>, errors: &mut Vec<Error>) -> Vec<Type> {
+    let mut types = Vec::new();
+    for field in fields {
+        for attr in field.attrs.iter().filter(|attr| attr.path().is_ident("config")) {
+            errors.push(Error::new_spanned(attr, "`config` attributes are not supported on tuple struct fields"));
+        }
+        types.push(field.ty.clone());
     }
-
-    Ok(StructPlan { ident: input.ident.clone(), generics: input.generics.clone(), source, fields: plans })
+    types
 }
 
 /// Where a `#[config(...)]` attribute is written.
@@ -209,6 +236,13 @@ mod tests {
         build(input).err().expect("expected an error").to_string()
     }
 
+    fn named(plan: &StructPlan) -> &[FieldPlan] {
+        match &plan.kind {
+            StructKind::Named(fields) => fields,
+            _ => panic!("expected a struct with named fields"),
+        }
+    }
+
     #[test]
     fn named_struct_builds() {
         let plan = build(&parse_quote! {
@@ -217,7 +251,7 @@ mod tests {
         .unwrap();
         assert_eq!(plan.ident, "Settings");
         assert!(plan.source.is_none());
-        let keys: Vec<_> = plan.fields.iter().map(|f| f.key.as_str()).collect();
+        let keys: Vec<_> = named(&plan).iter().map(|f| f.key.as_str()).collect();
         assert_eq!(keys, ["port", "host"]);
     }
 
@@ -232,13 +266,27 @@ mod tests {
     }
 
     #[test]
-    fn rejects_tuple_struct() {
-        assert!(error(&parse_quote! { struct T(u8); }).contains("tuple structs"));
+    fn tuple_and_unit_structs_build() {
+        let plan = build(&parse_quote! { struct Port(u16); }).unwrap();
+        let u16_ty: Type = parse_quote!(u16);
+        assert!(matches!(&plan.kind, StructKind::Tuple(types) if *types == [u16_ty]));
+        let plan = build(&parse_quote! { struct Pair(String, u8); }).unwrap();
+        assert!(matches!(&plan.kind, StructKind::Tuple(types) if types.len() == 2));
+        let plan = build(&parse_quote! { struct Marker; }).unwrap();
+        assert!(matches!(plan.kind, StructKind::Unit));
     }
 
     #[test]
-    fn rejects_unit_struct() {
-        assert!(error(&parse_quote! { struct U; }).contains("unit structs"));
+    fn rejects_path_without_named_fields() {
+        let msg = "`path` requires a struct with named fields";
+        assert_eq!(error(&parse_quote! { #[config(path = "a.toml")] struct Port(u16); }), msg);
+        assert_eq!(error(&parse_quote! { #[config(path = "a.toml", check = false)] struct Marker; }), msg);
+    }
+
+    #[test]
+    fn rejects_config_attributes_on_tuple_fields() {
+        let errors = messages(&parse_quote! { struct Pair(#[config(default)] u8, #[config(rename = "b")] u8); });
+        assert_eq!(errors, ["`config` attributes are not supported on tuple struct fields"; 2]);
     }
 
     fn messages(input: &DeriveInput) -> Vec<String> {
@@ -283,7 +331,7 @@ mod tests {
         })
         .unwrap();
         let expected: Expr = parse_quote!(8080 + 1);
-        assert!(matches!(&plan.fields[0].default, Some(FieldDefault::Expr(expr)) if *expr == expected));
+        assert!(matches!(&named(&plan)[0].default, Some(FieldDefault::Expr(expr)) if *expr == expected));
     }
 
     #[test]
@@ -297,9 +345,9 @@ mod tests {
             }
         })
         .unwrap();
-        assert!(matches!(plan.fields[0].default, Some(FieldDefault::Trait)));
-        assert!(matches!(plan.fields[1].default, Some(FieldDefault::Trait)));
-        assert_eq!(plan.fields[1].key, "n");
+        assert!(matches!(named(&plan)[0].default, Some(FieldDefault::Trait)));
+        assert!(matches!(named(&plan)[1].default, Some(FieldDefault::Trait)));
+        assert_eq!(named(&plan)[1].key, "n");
     }
 
     #[test]
@@ -397,7 +445,7 @@ mod tests {
     }
 
     fn field<'a>(plan: &'a StructPlan, name: &str) -> &'a FieldPlan {
-        plan.fields.iter().find(|f| f.ident == name).unwrap()
+        named(plan).iter().find(|f| f.ident == name).unwrap()
     }
 
     #[test]
@@ -415,7 +463,7 @@ mod tests {
     #[test]
     fn raw_ident_key_is_unraw() {
         let plan = build(&parse_quote! { struct S { r#type: String } }).unwrap();
-        let ty = &plan.fields[0];
+        let ty = &named(&plan)[0];
         assert_eq!(ty.ident, "r#type");
         assert_eq!(ty.key, "type");
     }

@@ -1,34 +1,111 @@
 //! Back end of the derive: turns a [`StructPlan`] into the emitted impls.
 
-use proc_macro2::TokenStream as TokenStream2;
-use quote::quote;
-use syn::LitStr;
+use proc_macro2::{Literal, TokenStream as TokenStream2};
+use quote::{format_ident, quote};
+use syn::{LitStr, Type};
 
-use crate::plan::{FieldDefault, FieldPlan, SourcePlan, StructPlan};
+use crate::plan::{FieldDefault, FieldPlan, SourcePlan, StructKind, StructPlan};
 
 /// Emits the `FromValue` impl for `plan`, plus the loading methods when it has a `path`.
 pub fn expand(plan: &StructPlan) -> TokenStream2 {
     let ident = &plan.ident;
     let (impl_generics, ty_generics, where_clause) = plan.generics.split_for_impl();
-    let fields = plan.fields.iter().map(field_init);
+    let body = match &plan.kind {
+        StructKind::Named(fields) => named_body(fields),
+        StructKind::Tuple(types) => match types.as_slice() {
+            [inner] => newtype_body(inner),
+            _ => tuple_body(types),
+        },
+        StructKind::Unit => unit_body(),
+    };
     let load = plan.source.as_ref().map(|source| load_impl(plan, source));
     quote! {
         #[automatically_derived]
         impl #impl_generics ::cfgy::FromValue for #ident #ty_generics #where_clause {
-            fn from_value(
-                __cfgy_value: &::cfgy::Value,
-                __cfgy_path: &mut ::cfgy::PathStack,
-            ) -> ::core::result::Result<Self, ::cfgy::ConfigError> {
-                let ::cfgy::Value::Map(__cfgy_map) = __cfgy_value else {
-                    return ::core::result::Result::Err(
-                        ::cfgy::ConfigError::type_mismatch(__cfgy_path, "table", __cfgy_value),
-                    );
-                };
-                ::core::result::Result::Ok(Self { #(#fields)* })
-            }
+            #body
         }
 
         #load
+    }
+}
+
+/// A struct with named fields reads a table.
+fn named_body(fields: &[FieldPlan]) -> TokenStream2 {
+    let fields = fields.iter().map(field_init);
+    quote! {
+        fn from_value(
+            __cfgy_value: &::cfgy::Value,
+            __cfgy_path: &mut ::cfgy::PathStack,
+        ) -> ::core::result::Result<Self, ::cfgy::ConfigError> {
+            let ::cfgy::Value::Map(__cfgy_map) = __cfgy_value else {
+                return ::core::result::Result::Err(
+                    ::cfgy::ConfigError::type_mismatch(__cfgy_path, "table", __cfgy_value),
+                );
+            };
+            ::core::result::Result::Ok(Self { #(#fields)* })
+        }
+    }
+}
+
+/// A newtype is transparent: it reads, and is optional, exactly as its inner type.
+fn newtype_body(inner: &Type) -> TokenStream2 {
+    quote! {
+        fn from_value(
+            __cfgy_value: &::cfgy::Value,
+            __cfgy_path: &mut ::cfgy::PathStack,
+        ) -> ::core::result::Result<Self, ::cfgy::ConfigError> {
+            <#inner as ::cfgy::FromValue>::from_value(__cfgy_value, __cfgy_path).map(Self)
+        }
+
+        fn from_missing() -> ::core::option::Option<Self> {
+            <#inner as ::cfgy::FromValue>::from_missing().map(Self)
+        }
+    }
+}
+
+/// A tuple struct of any other arity reads a sequence of exactly that many items, like a tuple.
+fn tuple_body(types: &[Type]) -> TokenStream2 {
+    let len = Literal::usize_unsuffixed(types.len());
+    let items: Vec<_> = (0..types.len()).map(|index| format_ident!("__cfgy_item{index}")).collect();
+    let converts = types.iter().zip(&items).enumerate().map(|(index, (ty, item))| {
+        let index = Literal::usize_unsuffixed(index);
+        quote! {
+            __cfgy_path.with_index(#index, |__cfgy_path| <#ty as ::cfgy::FromValue>::from_value(#item, __cfgy_path))?
+        }
+    });
+    quote! {
+        fn from_value(
+            __cfgy_value: &::cfgy::Value,
+            __cfgy_path: &mut ::cfgy::PathStack,
+        ) -> ::core::result::Result<Self, ::cfgy::ConfigError> {
+            let ::cfgy::Value::Seq(__cfgy_items) = __cfgy_value else {
+                return ::core::result::Result::Err(
+                    ::cfgy::ConfigError::type_mismatch(__cfgy_path, "sequence", __cfgy_value),
+                );
+            };
+            let [#(#items),*] = __cfgy_items.as_slice() else {
+                return ::core::result::Result::Err(
+                    ::cfgy::ConfigError::length(__cfgy_path, #len, __cfgy_items.len()),
+                );
+            };
+            ::core::result::Result::Ok(Self(#(#converts),*))
+        }
+    }
+}
+
+/// A unit struct reads only null.
+fn unit_body() -> TokenStream2 {
+    quote! {
+        fn from_value(
+            __cfgy_value: &::cfgy::Value,
+            __cfgy_path: &mut ::cfgy::PathStack,
+        ) -> ::core::result::Result<Self, ::cfgy::ConfigError> {
+            if ::core::matches!(__cfgy_value, ::cfgy::Value::Null) {
+                ::core::result::Result::Ok(Self)
+            } else {
+                ::core::result::Result::Err(::cfgy::ConfigError::type_mismatch(__cfgy_path, "null", __cfgy_value))
+            }
+        }
     }
 }
 
@@ -177,6 +254,31 @@ mod tests {
         assert!(out.contains(":: core :: default :: Default :: default ()"), "{out}");
         assert!(!out.contains("DefaultFrom"), "{out}");
         assert!(!out.contains("ConfigError :: missing"), "{out}");
+    }
+
+    #[test]
+    fn newtype_delegates_to_its_inner_type() {
+        let out = expand_str(&parse_quote! { struct Port(u16); });
+        let from_value = "< u16 as :: cfgy :: FromValue > :: from_value (__cfgy_value , __cfgy_path) . map (Self)";
+        assert!(out.contains(from_value), "{out}");
+        assert!(out.contains("< u16 as :: cfgy :: FromValue > :: from_missing () . map (Self)"), "{out}");
+        assert!(!out.contains("Value :: Map"), "{out}");
+    }
+
+    #[test]
+    fn tuple_struct_reads_an_exact_length_sequence() {
+        let out = expand_str(&parse_quote! { struct Pair(String, u8); });
+        assert!(out.contains("let [__cfgy_item0 , __cfgy_item1] = __cfgy_items . as_slice ()"), "{out}");
+        assert!(out.contains("ConfigError :: length (__cfgy_path , 2 , __cfgy_items . len ())"), "{out}");
+        assert!(out.contains("with_index (1 , | __cfgy_path | < u8 as :: cfgy :: FromValue >"), "{out}");
+        assert!(!out.contains("from_missing"), "{out}");
+    }
+
+    #[test]
+    fn unit_struct_reads_null() {
+        let out = expand_str(&parse_quote! { struct Marker; });
+        assert!(out.contains(":: cfgy :: Value :: Null"), "{out}");
+        assert!(out.contains("Ok (Self)"), "{out}");
     }
 
     // The plan rejects `format = "yaml"` unless the feature is enabled.
