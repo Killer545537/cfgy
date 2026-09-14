@@ -1,8 +1,30 @@
 //! Serialize generated `Value` trees to each format, parse them back with the adapter, and compare.
 #![cfg(any(feature = "toml", feature = "json", feature = "yaml"))]
 
-use cfgy_core::{Format, IndexMap, Value};
+use cfgy_core::{Format, IndexMap, Parsed, PathStack, Value};
 use proptest::prelude::*;
+
+/// Parses `text` and checks the value matches and every path in it, the root included, has a span.
+fn check(format: &dyn Format, text: &str, expected: &Value) -> Result<(), TestCaseError> {
+    fn first_unspanned(parsed: &Parsed, value: &Value, path: &mut PathStack) -> Option<String> {
+        if parsed.spans.get(path.segments()).is_none() {
+            return Some(format!("`{path}`"));
+        }
+        match value {
+            Value::Seq(items) => items
+                .iter()
+                .enumerate()
+                .find_map(|(i, item)| path.with_index(i, |path| first_unspanned(parsed, item, path))),
+            Value::Map(map) => map.iter().find_map(|(k, v)| path.with_key(k, |path| first_unspanned(parsed, v, path))),
+            _ => None,
+        }
+    }
+    let parsed = format.parse(text).map_err(|err| TestCaseError::fail(format!("{err:?}\n{text}")))?;
+    prop_assert_eq!(&parsed.value, expected, "{}", text);
+    let missing = first_unspanned(&parsed, &parsed.value, &mut PathStack::new());
+    prop_assert!(missing.is_none(), "{} has no span in\n{}", missing.unwrap_or_default(), text);
+    Ok(())
+}
 
 /// A document root: a map whose values nest up to three levels deep.
 fn document(null: bool) -> impl Strategy<Value = IndexMap<String, Value>> {
@@ -69,23 +91,20 @@ proptest! {
     #[cfg(feature = "toml")]
     fn toml(map in document(false)) {
         let text = to_toml(&map);
-        let value = Value::Map(map);
-        prop_assert_eq!(cfgy_formats::Toml.parse(&text).map(|parsed| parsed.value), Ok(value), "{}", text);
+        check(&cfgy_formats::Toml, &text, &Value::Map(map))?;
     }
 
     #[test]
     #[cfg(feature = "json")]
     fn json(map in document(true)) {
         let value = Value::Map(map);
-        let text = inline(&value, ": ");
-        prop_assert_eq!(cfgy_formats::Json.parse(&text).map(|parsed| parsed.value), Ok(value), "{}", text);
+        check(&cfgy_formats::Json, &inline(&value, ": "), &value)?;
     }
 
     #[test]
     #[cfg(feature = "yaml")]
     fn yaml(map in document(true)) {
         let value = Value::Map(map);
-        let text = inline(&value, ": ");
-        prop_assert_eq!(cfgy_formats::Yaml.parse(&text).map(|parsed| parsed.value), Ok(value), "{}", text);
+        check(&cfgy_formats::Yaml, &inline(&value, ": "), &value)?;
     }
 }
