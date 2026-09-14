@@ -61,8 +61,6 @@ impl RenameRule {
     }
 
     /// Converts a `PascalCase` variant name.
-    // `allow`, not `expect`: rustc 1.85 does not fulfil a `dead_code` expectation here.
-    #[cfg_attr(not(test), allow(dead_code, reason = "used once enums derive `FromConfig`"))]
     pub fn apply_to_variant(self, variant: &str) -> String {
         match self {
             Self::Pascal => variant.to_owned(),

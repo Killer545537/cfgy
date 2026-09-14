@@ -5,7 +5,7 @@ use quote::{ToTokens, format_ident, quote};
 use syn::ext::IdentExt;
 use syn::{LitStr, Type};
 
-use crate::plan::{FieldDefault, FieldPlan, SourcePlan, StructKind, StructPlan};
+use crate::plan::{EnumRepr, FieldDefault, FieldPlan, SourcePlan, StructKind, StructPlan, VariantKind, VariantPlan};
 
 /// Emits the `FromValue` impl for `plan`, plus the loading methods when it has a `path`.
 pub fn expand(plan: &StructPlan) -> TokenStream2 {
@@ -18,6 +18,7 @@ pub fn expand(plan: &StructPlan) -> TokenStream2 {
             _ => tuple_body(types),
         },
         StructKind::Unit => unit_body(),
+        StructKind::Enum { repr, variants } => enum_body(ident, repr, variants),
     };
     let shape = shape(plan);
     let load = plan.source.as_ref().map(|source| load_impl(plan, source));
@@ -36,29 +37,64 @@ pub fn expand(plan: &StructPlan) -> TokenStream2 {
 /// The `FromValue::SHAPE` of the derived type, mirroring what its `from_value` accepts.
 fn shape(plan: &StructPlan) -> TokenStream2 {
     let ident = &plan.ident;
+    let name = ident.unraw().to_string();
     match &plan.kind {
-        StructKind::Named(fields) => {
-            let name = LitStr::new(&ident.unraw().to_string(), ident.span());
-            let fields = fields.iter().map(|field| {
-                let key = LitStr::new(&field.key, field.key_span);
-                let shape = field_shape(&field.ty, field.unchecked, ident);
-                let has_default = field.default.is_some();
-                quote! { ::cfgy::Field { key: #key, shape: #shape, has_default: #has_default } }
-            });
-            quote! { &::cfgy::Shape::Table { name: #name, fields: &[#(#fields),*] } }
-        }
-        StructKind::Tuple(types) => {
-            let mut shapes = types.iter().map(|ty| field_shape(ty, false, ident));
-            match (shapes.next(), shapes.next()) {
-                (Some(inner), None) => inner,
-                (first, second) => {
-                    let shapes = first.into_iter().chain(second).chain(shapes);
-                    quote! { &::cfgy::Shape::Tuple(&[#(#shapes),*]) }
-                }
-            }
-        }
+        StructKind::Named(fields) => table_shape(&name, fields, ident),
+        StructKind::Tuple(types) => match types.as_slice() {
+            [inner] => field_shape(inner, false, ident),
+            _ => tuple_shape(types, ident),
+        },
         StructKind::Unit => quote! { &::cfgy::Shape::Null },
+        StructKind::Enum { repr, variants } => {
+            let repr = match repr {
+                EnumRepr::External => quote! { ::cfgy::Repr::External },
+                EnumRepr::Internal { tag } => quote! { ::cfgy::Repr::Internal { tag: #tag } },
+                EnumRepr::Adjacent { tag, content } => {
+                    quote! { ::cfgy::Repr::Adjacent { tag: #tag, content: #content } }
+                }
+                EnumRepr::Untagged => quote! { ::cfgy::Repr::Untagged },
+            };
+            let variants = variants.iter().map(|variant| {
+                let variant_name = LitStr::new(&variant.name, variant.name_span);
+                let payload = match &variant.kind {
+                    VariantKind::Unit => quote! { ::core::option::Option::None },
+                    VariantKind::Newtype(ty) => {
+                        let shape = field_shape(ty, false, ident);
+                        quote! { ::core::option::Option::Some(#shape) }
+                    }
+                    VariantKind::Tuple(types) => {
+                        let shape = tuple_shape(types, ident);
+                        quote! { ::core::option::Option::Some(#shape) }
+                    }
+                    VariantKind::Struct(fields) => {
+                        let shape = table_shape(&format!("{name}::{}", variant.ident.unraw()), fields, ident);
+                        quote! { ::core::option::Option::Some(#shape) }
+                    }
+                };
+                quote! { ::cfgy::Variant { name: #variant_name, payload: #payload } }
+            });
+            let name = LitStr::new(&name, ident.span());
+            quote! { &::cfgy::Shape::Enum { name: #name, repr: #repr, variants: &[#(#variants),*] } }
+        }
     }
+}
+
+/// A `Shape::Table` named `name` listing `fields`, with recursion into `ident` cut as in [`field_shape`].
+fn table_shape(name: &str, fields: &[FieldPlan], ident: &Ident) -> TokenStream2 {
+    let name = LitStr::new(name, ident.span());
+    let fields = fields.iter().map(|field| {
+        let key = LitStr::new(&field.key, field.key_span);
+        let shape = field_shape(&field.ty, field.unchecked, ident);
+        let has_default = field.default.is_some();
+        quote! { ::cfgy::Field { key: #key, shape: #shape, has_default: #has_default } }
+    });
+    quote! { &::cfgy::Shape::Table { name: #name, fields: &[#(#fields),*] } }
+}
+
+/// A `Shape::Tuple` of `types`, with recursion into `ident` cut as in [`field_shape`].
+fn tuple_shape(types: &[Type], ident: &Ident) -> TokenStream2 {
+    let shapes = types.iter().map(|ty| field_shape(ty, false, ident));
+    quote! { &::cfgy::Shape::Tuple(&[#(#shapes),*]) }
 }
 
 /// `<ty as FromValue>::SHAPE`, or `Shape::Any` for an `unchecked` field or one whose type names the struct itself.
@@ -84,18 +120,13 @@ fn mentions(tokens: TokenStream2, ident: &Ident) -> bool {
 
 /// A struct with named fields reads a table.
 fn named_body(fields: &[FieldPlan]) -> TokenStream2 {
-    let fields = fields.iter().map(field_init);
+    let payload = table_payload(&format_ident!("__cfgy_value"), &quote!(Self), fields);
     quote! {
         fn from_value(
             __cfgy_value: &::cfgy::Value,
             __cfgy_path: &mut ::cfgy::PathStack,
         ) -> ::core::result::Result<Self, ::cfgy::ConfigError> {
-            let ::cfgy::Value::Map(__cfgy_map) = __cfgy_value else {
-                return ::core::result::Result::Err(
-                    ::cfgy::ConfigError::type_mismatch(__cfgy_path, "table", __cfgy_value),
-                );
-            };
-            ::core::result::Result::Ok(Self { #(#fields)* })
+            #payload
         }
     }
 }
@@ -118,6 +149,45 @@ fn newtype_body(inner: &Type) -> TokenStream2 {
 
 /// A tuple struct of any other arity reads a sequence of exactly that many items, like a tuple.
 fn tuple_body(types: &[Type]) -> TokenStream2 {
+    let payload = tuple_payload(&format_ident!("__cfgy_value"), &quote!(Self), types);
+    quote! {
+        fn from_value(
+            __cfgy_value: &::cfgy::Value,
+            __cfgy_path: &mut ::cfgy::PathStack,
+        ) -> ::core::result::Result<Self, ::cfgy::ConfigError> {
+            #payload
+        }
+    }
+}
+
+/// A unit struct reads only null.
+fn unit_body() -> TokenStream2 {
+    let payload = unit_payload(&format_ident!("__cfgy_value"), &quote!(Self));
+    quote! {
+        fn from_value(
+            __cfgy_value: &::cfgy::Value,
+            __cfgy_path: &mut ::cfgy::PathStack,
+        ) -> ::core::result::Result<Self, ::cfgy::ConfigError> {
+            #payload
+        }
+    }
+}
+
+/// Statements reading the table `value` into `ctor { fields }`, ending in a `Result<Self, ConfigError>`.
+fn table_payload(value: &Ident, ctor: &TokenStream2, fields: &[FieldPlan]) -> TokenStream2 {
+    let fields = fields.iter().map(field_init);
+    quote! {
+        let ::cfgy::Value::Map(__cfgy_map) = #value else {
+            return ::core::result::Result::Err(
+                ::cfgy::ConfigError::type_mismatch(__cfgy_path, "table", #value),
+            );
+        };
+        ::core::result::Result::Ok(#ctor { #(#fields)* })
+    }
+}
+
+/// Statements reading `value` as a sequence of exactly `types.len()` items into `ctor(..)`.
+fn tuple_payload(value: &Ident, ctor: &TokenStream2, types: &[Type]) -> TokenStream2 {
     let len = Literal::usize_unsuffixed(types.len());
     let items: Vec<_> = (0..types.len()).map(|index| format_ident!("__cfgy_item{index}")).collect();
     let converts = types.iter().zip(&items).enumerate().map(|(index, (ty, item))| {
@@ -127,38 +197,260 @@ fn tuple_body(types: &[Type]) -> TokenStream2 {
         }
     });
     quote! {
-        fn from_value(
-            __cfgy_value: &::cfgy::Value,
-            __cfgy_path: &mut ::cfgy::PathStack,
-        ) -> ::core::result::Result<Self, ::cfgy::ConfigError> {
-            let ::cfgy::Value::Seq(__cfgy_items) = __cfgy_value else {
-                return ::core::result::Result::Err(
-                    ::cfgy::ConfigError::type_mismatch(__cfgy_path, "sequence", __cfgy_value),
-                );
-            };
-            let [#(#items),*] = __cfgy_items.as_slice() else {
-                return ::core::result::Result::Err(
-                    ::cfgy::ConfigError::length(__cfgy_path, #len, __cfgy_items.len()),
-                );
-            };
-            ::core::result::Result::Ok(Self(#(#converts),*))
+        let ::cfgy::Value::Seq(__cfgy_items) = #value else {
+            return ::core::result::Result::Err(
+                ::cfgy::ConfigError::type_mismatch(__cfgy_path, "sequence", #value),
+            );
+        };
+        let [#(#items),*] = __cfgy_items.as_slice() else {
+            return ::core::result::Result::Err(
+                ::cfgy::ConfigError::length(__cfgy_path, #len, __cfgy_items.len()),
+            );
+        };
+        ::core::result::Result::Ok(#ctor(#(#converts),*))
+    }
+}
+
+/// An expression reading `value` as null into `ctor`.
+fn unit_payload(value: &Ident, ctor: &TokenStream2) -> TokenStream2 {
+    quote! {
+        if ::core::matches!(#value, ::cfgy::Value::Null) {
+            ::core::result::Result::Ok(#ctor)
+        } else {
+            ::core::result::Result::Err(::cfgy::ConfigError::type_mismatch(__cfgy_path, "null", #value))
         }
     }
 }
 
-/// A unit struct reads only null.
-fn unit_body() -> TokenStream2 {
+/// Statements reading `value` as the payload of `variant`, ending in a `Result<Self, ConfigError>`.
+///
+/// A unit variant's payload is null; a newtype variant reads exactly as its inner type.
+fn variant_payload(value: &Ident, variant: &VariantPlan) -> TokenStream2 {
+    let ident = &variant.ident;
+    let ctor = quote!(Self::#ident);
+    match &variant.kind {
+        VariantKind::Unit => unit_payload(value, &ctor),
+        VariantKind::Newtype(ty) => quote! { <#ty as ::cfgy::FromValue>::from_value(#value, __cfgy_path).map(#ctor) },
+        VariantKind::Tuple(types) => tuple_payload(value, &ctor, types),
+        VariantKind::Struct(fields) => table_payload(value, &ctor, fields),
+    }
+}
+
+/// `path.with_key(key, |path| <payload of variant>)`: reads a payload nested under `key`, so errors name it.
+fn nested_payload(key: &TokenStream2, variant: &VariantPlan) -> TokenStream2 {
+    let payload = variant_payload(&format_ident!("__cfgy_payload"), variant);
+    quote! {
+        __cfgy_path.with_key(
+            #key,
+            |__cfgy_path| -> ::core::result::Result<Self, ::cfgy::ConfigError> { #payload },
+        )
+    }
+}
+
+/// The errors every enum representation reports, as `return`-able expressions.
+struct EnumErrors {
+    /// `ConfigError::UnknownVariant` for the string `__cfgy_name`, at the enum itself.
+    unknown: TokenStream2,
+    /// A type error expecting "a variant of `Enum`", for a value of the wrong kind.
+    mismatch: TokenStream2,
+}
+
+/// An enum reads the variant its value names, in serde's representation `repr`.
+///
+/// Payload errors are nested under the variant name (externally tagged) or the `content` key (adjacently tagged);
+/// internally tagged fields sit beside the tag.
+fn enum_body(ident: &Ident, repr: &EnumRepr, variants: &[VariantPlan]) -> TokenStream2 {
+    let name = LitStr::new(&ident.unraw().to_string(), ident.span());
+    let all_names = variants.iter().map(|variant| format!("`{}`", variant.name)).collect::<Vec<_>>().join(", ");
+    let expected = format!("a variant of {}", name.value());
+    let errors = EnumErrors {
+        unknown: quote! {
+            ::core::result::Result::Err(
+                ::cfgy::ConfigError::unknown_variant(__cfgy_path, #name, __cfgy_name, #all_names),
+            )
+        },
+        mismatch: quote! {
+            ::core::result::Result::Err(::cfgy::ConfigError::type_mismatch(__cfgy_path, #expected, __cfgy_value))
+        },
+    };
+    let body = match repr {
+        EnumRepr::External => external_body(variants, &errors),
+        EnumRepr::Internal { tag } => internal_body(tag, variants, &errors),
+        EnumRepr::Adjacent { tag, content } => adjacent_body(tag, content, variants, &errors),
+        EnumRepr::Untagged => untagged_body(variants, &errors.mismatch),
+    };
     quote! {
         fn from_value(
             __cfgy_value: &::cfgy::Value,
             __cfgy_path: &mut ::cfgy::PathStack,
         ) -> ::core::result::Result<Self, ::cfgy::ConfigError> {
-            if ::core::matches!(__cfgy_value, ::cfgy::Value::Null) {
-                ::core::result::Result::Ok(Self)
-            } else {
-                ::core::result::Result::Err(::cfgy::ConfigError::type_mismatch(__cfgy_path, "null", __cfgy_value))
+            #body
+        }
+    }
+}
+
+/// The string literal a variant is written as.
+fn variant_name(variant: &VariantPlan) -> LitStr {
+    LitStr::new(&variant.name, variant.name_span)
+}
+
+/// `"Unit"` names a unit variant; `{ Variant = payload }` any variant, with a unit variant's payload null.
+fn external_body(variants: &[VariantPlan], errors: &EnumErrors) -> TokenStream2 {
+    let EnumErrors { unknown, mismatch } = errors;
+    let (unit, with_payload): (Vec<_>, Vec<_>) =
+        variants.iter().partition(|variant| matches!(variant.kind, VariantKind::Unit));
+    let unit = unit.into_iter().map(|variant| {
+        let (name, ident) = (variant_name(variant), &variant.ident);
+        quote! { #name => ::core::result::Result::Ok(Self::#ident), }
+    });
+    let with_payload: Vec<_> = with_payload.into_iter().map(variant_name).collect();
+    // A variant that needs a payload, named by a bare string.
+    let with_payload = (!with_payload.is_empty()).then(|| quote! { #(#with_payload)|* => #mismatch, });
+    let tagged = variants.iter().map(|variant| {
+        let name = variant_name(variant);
+        let payload = nested_payload(&quote!(#name), variant);
+        quote! { #name => #payload, }
+    });
+    quote! {
+        match __cfgy_value {
+            ::cfgy::Value::Str(__cfgy_name) => match __cfgy_name.as_str() {
+                #(#unit)*
+                #with_payload
+                _ => #unknown,
+            },
+            ::cfgy::Value::Map(__cfgy_map) => match (__cfgy_map.len(), __cfgy_map.first()) {
+                (1, ::core::option::Option::Some((__cfgy_name, __cfgy_payload))) => match __cfgy_name.as_str() {
+                    #(#tagged)*
+                    _ => #unknown,
+                },
+                _ => #mismatch,
+            },
+            _ => #mismatch,
+        }
+    }
+}
+
+/// `{ tag = "Variant", ..payload }`: the table itself is the payload, and a unit variant ignores the other keys.
+fn internal_body(tag: &LitStr, variants: &[VariantPlan], errors: &EnumErrors) -> TokenStream2 {
+    let value = format_ident!("__cfgy_value");
+    let arms = variants.iter().map(|variant| {
+        let (name, ident) = (variant_name(variant), &variant.ident);
+        let payload = match variant.kind {
+            VariantKind::Unit => quote! { ::core::result::Result::Ok(Self::#ident) },
+            _ => variant_payload(&value, variant),
+        };
+        quote! { #name => { #payload } }
+    });
+    let read_tag = read_tag(tag, &errors.mismatch);
+    let unknown = &errors.unknown;
+    quote! {
+        #read_tag
+        match __cfgy_name.as_str() {
+            #(#arms)*
+            _ => #unknown,
+        }
+    }
+}
+
+/// `{ tag = "Variant", content = payload }`. An absent `content` is fine for a unit variant, and for a newtype variant
+/// whose type has a `from_missing` (serde's `missing_field` makes it `None` for an `Option`).
+fn adjacent_body(tag: &LitStr, content: &LitStr, variants: &[VariantPlan], errors: &EnumErrors) -> TokenStream2 {
+    let missing = quote! {
+        ::core::result::Result::Err(
+            __cfgy_path.with_key(#content, |__cfgy_path| ::cfgy::ConfigError::missing(__cfgy_path)),
+        )
+    };
+    let arms = variants.iter().map(|variant| {
+        let (name, ident) = (variant_name(variant), &variant.ident);
+        let payload = nested_payload(&quote!(#content), variant);
+        let absent = match &variant.kind {
+            VariantKind::Unit => quote! { ::core::result::Result::Ok(Self::#ident) },
+            VariantKind::Newtype(ty) => quote! {
+                match <#ty as ::cfgy::FromValue>::from_missing() {
+                    ::core::option::Option::Some(__cfgy_missing) => {
+                        ::core::result::Result::Ok(Self::#ident(__cfgy_missing))
+                    }
+                    ::core::option::Option::None => #missing,
+                }
+            },
+            VariantKind::Tuple(_) | VariantKind::Struct(_) => missing.clone(),
+        };
+        quote! {
+            #name => match __cfgy_content {
+                ::core::option::Option::Some(__cfgy_payload) => #payload,
+                ::core::option::Option::None => #absent,
+            },
+        }
+    });
+    let read_tag = read_tag(tag, &errors.mismatch);
+    let unknown = &errors.unknown;
+    quote! {
+        #read_tag
+        let __cfgy_content = __cfgy_map.get(#content);
+        match __cfgy_name.as_str() {
+            #(#arms)*
+            _ => #unknown,
+        }
+    }
+}
+
+/// The first variant, in declaration order, that reads the value; a unit variant reads null. Errors from the failed
+/// attempts are dropped, as serde's untagged enums do.
+fn untagged_body(variants: &[VariantPlan], mismatch: &TokenStream2) -> TokenStream2 {
+    let value = format_ident!("__cfgy_value");
+    let attempts = variants.iter().map(|variant| {
+        let ident = &variant.ident;
+        match &variant.kind {
+            VariantKind::Unit => quote! {
+                if ::core::matches!(__cfgy_value, ::cfgy::Value::Null) {
+                    return ::core::result::Result::Ok(Self::#ident);
+                }
+            },
+            VariantKind::Newtype(ty) => quote! {
+                if let ::core::result::Result::Ok(__cfgy_inner) =
+                    <#ty as ::cfgy::FromValue>::from_value(__cfgy_value, __cfgy_path)
+                {
+                    return ::core::result::Result::Ok(Self::#ident(__cfgy_inner));
+                }
+            },
+            VariantKind::Tuple(_) | VariantKind::Struct(_) => {
+                let payload = variant_payload(&value, variant);
+                quote! {
+                    let __cfgy_attempt: fn(
+                        &::cfgy::Value,
+                        &mut ::cfgy::PathStack,
+                    ) -> ::core::result::Result<Self, ::cfgy::ConfigError> = |__cfgy_value, __cfgy_path| {
+                        #payload
+                    };
+                    if let ::core::result::Result::Ok(__cfgy_variant) = __cfgy_attempt(__cfgy_value, __cfgy_path) {
+                        return ::core::result::Result::Ok(__cfgy_variant);
+                    }
+                }
             }
         }
+    });
+    quote! {
+        #(#attempts)*
+        #mismatch
+    }
+}
+
+/// Statements binding `__cfgy_map` to the table and `__cfgy_name` to its string `tag`, returning early otherwise.
+fn read_tag(tag: &LitStr, mismatch: &TokenStream2) -> TokenStream2 {
+    quote! {
+        let ::cfgy::Value::Map(__cfgy_map) = __cfgy_value else {
+            return #mismatch;
+        };
+        let ::core::option::Option::Some(__cfgy_tag) = __cfgy_map.get(#tag) else {
+            return ::core::result::Result::Err(
+                __cfgy_path.with_key(#tag, |__cfgy_path| ::cfgy::ConfigError::missing(__cfgy_path)),
+            );
+        };
+        let ::cfgy::Value::Str(__cfgy_name) = __cfgy_tag else {
+            return ::core::result::Result::Err(__cfgy_path.with_key(#tag, |__cfgy_path| {
+                ::cfgy::ConfigError::type_mismatch(__cfgy_path, "string", __cfgy_tag)
+            }));
+        };
     }
 }
 
@@ -389,6 +681,131 @@ mod tests {
         let out = expand_str(&parse_quote! { struct Marker; });
         assert!(out.contains(":: cfgy :: Value :: Null"), "{out}");
         assert!(out.contains("Ok (Self)"), "{out}");
+    }
+
+    const UNKNOWN: &str = "Err (:: cfgy :: ConfigError :: unknown_variant (__cfgy_path , \"Mode\" , __cfgy_name , \
+                           \"`Off`, `Port`, `Serve`\") ,)";
+    const MISMATCH: &str =
+        "Err (:: cfgy :: ConfigError :: type_mismatch (__cfgy_path , \"a variant of Mode\" , __cfgy_value))";
+
+    #[test]
+    fn enum_shape_lists_its_variants() {
+        let out = expand_str(&parse_quote! {
+            #[config(tag = "t", content = "c", rename_all = "lowercase")]
+            enum Mode {
+                Off,
+                Port(u16),
+                Pair(String, Box<Mode>),
+                Serve { #[config(default)] host: String, #[config(unchecked)] extra: u8 },
+            }
+        });
+        let expected = quote! {
+            const SHAPE: &'static ::cfgy::Shape = &::cfgy::Shape::Enum {
+                name: "Mode",
+                repr: ::cfgy::Repr::Adjacent { tag: "t", content: "c" },
+                variants: &[
+                    ::cfgy::Variant { name: "off", payload: ::core::option::Option::None },
+                    ::cfgy::Variant {
+                        name: "port",
+                        payload: ::core::option::Option::Some(<u16 as ::cfgy::FromValue>::SHAPE)
+                    },
+                    ::cfgy::Variant {
+                        name: "pair",
+                        payload: ::core::option::Option::Some(&::cfgy::Shape::Tuple(&[
+                            <String as ::cfgy::FromValue>::SHAPE,
+                            &::cfgy::Shape::Any
+                        ]))
+                    },
+                    ::cfgy::Variant {
+                        name: "serve",
+                        payload: ::core::option::Option::Some(&::cfgy::Shape::Table {
+                            name: "Mode::Serve",
+                            fields: &[
+                                ::cfgy::Field {
+                                    key: "host",
+                                    shape: <String as ::cfgy::FromValue>::SHAPE,
+                                    has_default: true
+                                },
+                                ::cfgy::Field { key: "extra", shape: &::cfgy::Shape::Any, has_default: false }
+                            ]
+                        })
+                    }
+                ]
+            };
+        };
+        assert!(out.contains(&expected.to_string()), "{out}");
+        let out = expand_str(&parse_quote! { #[config(tag = "type")] enum Mode { A(Self) } });
+        assert!(out.contains("repr : :: cfgy :: Repr :: Internal { tag : \"type\" }"), "{out}");
+        assert!(out.contains("payload : :: core :: option :: Option :: Some (& :: cfgy :: Shape :: Any)"), "{out}");
+        let out = expand_str(&parse_quote! { #[config(untagged)] enum Mode {} });
+        assert!(out.contains("repr : :: cfgy :: Repr :: Untagged , variants : & []"), "{out}");
+    }
+
+    #[test]
+    fn external_enum_reads_a_name_or_a_single_entry_table() {
+        let out = expand_str(&parse_quote! {
+            #[config(rename_all = "lowercase")]
+            enum Mode { Off, Port(u16), Serve { #[config(default)] host: String } }
+        });
+        assert!(out.contains("impl :: cfgy :: FromValue for Mode"), "{out}");
+        let unknown = UNKNOWN.replace("`Off`, `Port`, `Serve`", "`off`, `port`, `serve`");
+        assert_eq!(out.matches(&unknown).count(), 2, "{out}");
+        assert!(out.contains("\"off\" => :: core :: result :: Result :: Ok (Self :: Off) ,"), "{out}");
+        assert!(out.contains(&format!("\"port\" | \"serve\" => :: core :: result :: Result :: {MISMATCH}")), "{out}");
+        assert!(out.contains("(1 , :: core :: option :: Option :: Some ((__cfgy_name , __cfgy_payload)))"), "{out}");
+        assert!(out.contains("\"port\" => __cfgy_path . with_key (\"port\" ,"), "{out}");
+        assert!(out.contains(
+            "< u16 as :: cfgy :: FromValue > :: from_value (__cfgy_payload , __cfgy_path) . map (Self :: Port)"
+        ));
+        assert!(out.contains("Ok (Self :: Serve { host :"), "{out}");
+        assert!(out.contains("Default :: default ()"), "{out}");
+    }
+
+    #[test]
+    fn internal_enum_reads_the_tag_and_the_table_beside_it() {
+        let out = expand_str(&parse_quote! {
+            #[config(tag = "type")]
+            enum Mode { Off, Port(Server), Serve { host: String } }
+        });
+        assert!(out.contains(UNKNOWN), "{out}");
+        assert!(out.contains("__cfgy_map . get (\"type\")"), "{out}");
+        assert!(out.contains("with_key (\"type\" , | __cfgy_path | :: cfgy :: ConfigError :: missing (__cfgy_path))"));
+        assert!(out.contains("type_mismatch (__cfgy_path , \"string\" , __cfgy_tag)"), "{out}");
+        assert!(out.contains("\"Off\" => { :: core :: result :: Result :: Ok (Self :: Off) }"), "{out}");
+        // The payload is the whole table, so no key is pushed.
+        assert!(out.contains("from_value (__cfgy_value , __cfgy_path) . map (Self :: Port)"), "{out}");
+        assert!(!out.contains("with_key (\"Serve\""), "{out}");
+    }
+
+    #[test]
+    fn adjacent_enum_nests_the_payload_under_content() {
+        let out = expand_str(&parse_quote! {
+            #[config(tag = "t", content = "c")]
+            enum Mode { Off, Port(Option<u16>), Serve { host: String } }
+        });
+        assert!(out.contains(UNKNOWN), "{out}");
+        assert!(out.contains("let __cfgy_content = __cfgy_map . get (\"c\")"), "{out}");
+        assert!(
+            out.contains("__cfgy_path . with_key (\"c\" , | __cfgy_path | -> :: core :: result :: Result"),
+            "{out}"
+        );
+        assert!(out.contains("< Option < u16 > as :: cfgy :: FromValue > :: from_missing ()"), "{out}");
+        // Only the tag, the newtype and the struct variant can be missing.
+        assert_eq!(out.matches("ConfigError :: missing").count(), 4, "{out}");
+    }
+
+    #[test]
+    fn untagged_enum_tries_each_variant_in_order() {
+        let out = expand_str(&parse_quote! {
+            #[config(untagged)]
+            enum Mode { Off, Port(u16), Pair(u8, u8), Serve { host: String } }
+        });
+        let off = out.find("return :: core :: result :: Result :: Ok (Self :: Off)").unwrap();
+        let port = out.find("return :: core :: result :: Result :: Ok (Self :: Port (__cfgy_inner))").unwrap();
+        let attempts: Vec<_> = out.match_indices("let __cfgy_attempt").map(|(index, _)| index).collect();
+        let mismatch = out.rfind(MISMATCH).unwrap();
+        assert!(off < port && attempts.len() == 2 && port < attempts[0] && attempts[1] < mismatch, "{out}");
+        assert!(!out.contains("unknown_variant"), "{out}");
     }
 
     // The plan rejects `format = "yaml"` unless the feature is enabled.

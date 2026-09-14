@@ -108,6 +108,20 @@ pub const fn check_node(root: &Shape, doc: &Node, path: &[usize], prefix: &str) 
             message.push(key);
             message.push("`");
         }
+        Verdict::UnknownVariant(found, name, variants) => {
+            message.push(": unknown variant `");
+            message.push(found);
+            message.push("` of ");
+            message.push(name);
+            message.push(", expected one of ");
+            let mut rest = variants;
+            while let [variant, tail @ ..] = rest {
+                message.push("`");
+                message.push(variant.name);
+                message.push(if tail.is_empty() { "`" } else { "`, " });
+                rest = tail;
+            }
+        }
         Verdict::NoVariant(name) => {
             message.push(": ");
             message.push(node.kind());
@@ -128,7 +142,9 @@ enum Verdict {
     Length(usize, usize),
     /// A required key absent from a table.
     Missing(&'static str),
-    /// The enum's name.
+    /// A tag naming no variant: the tag, the enum's name, and its variants.
+    UnknownVariant(&'static str, &'static str, &'static [Variant]),
+    /// The enum's name, for a value that names no variant at all.
     NoVariant(&'static str),
 }
 
@@ -157,12 +173,26 @@ const fn local(shape: &Shape, node: &Node) -> Verdict {
         }
         (Shape::Table { fields, .. }, Node::Map(entries)) => return missing(fields, entries),
         (Shape::Enum { name, repr, variants }, _) => {
-            let Some(variant) = select_variant_locally(*repr, variants, node) else { return Verdict::NoVariant(name) };
+            let Some(variant) = select_variant_locally(*repr, variants, node) else {
+                return match (repr, node) {
+                    (Repr::Internal { tag } | Repr::Adjacent { tag, .. }, Node::Map(entries))
+                        if entry(entries, tag).is_none() =>
+                    {
+                        Verdict::Missing(tag)
+                    }
+                    _ => match unknown_tag(*repr, variants, node) {
+                        Some(found) => Verdict::UnknownVariant(found, name, variants),
+                        None => Verdict::NoVariant(name),
+                    },
+                };
+            };
             return match (repr, variant.payload, node) {
                 (Repr::Internal { .. }, Some(Shape::Table { fields, .. }), Node::Map(entries)) => {
                     missing(fields, entries)
                 }
-                (Repr::Adjacent { content, .. }, Some(_), Node::Map(entries)) if entry(entries, content).is_none() => {
+                (Repr::Adjacent { content, .. }, Some(payload), Node::Map(entries))
+                    if entry(entries, content).is_none() && !accepts_missing(payload) =>
+                {
                     Verdict::Missing(content)
                 }
                 _ => Verdict::Ok,
@@ -229,7 +259,9 @@ const fn entry_shape<'a>(shape: &'a Shape, entries: &'a [(&'static str, Node)], 
     let payload = match shape {
         Shape::Map(item) => return item,
         Shape::Table { fields, .. } => return field_shape(fields, key),
+        // A unit variant's payload, if written at all, is null.
         Shape::Enum { repr: Repr::External, variants, .. } => match find_variant(variants, key) {
+            Some(Variant { payload: None, .. }) => return &Shape::Null,
             Some(variant) => variant.payload,
             None => None,
         },
@@ -241,6 +273,7 @@ const fn entry_shape<'a>(shape: &'a Shape, entries: &'a [(&'static str, Node)], 
         }
         Shape::Enum { repr: Repr::Adjacent { tag, content }, variants, .. } if str_eq(key, content) => {
             match tagged_variant(variants, entries, tag) {
+                Some(Variant { payload: None, .. }) => return &Shape::Null,
                 Some(variant) => variant.payload,
                 None => None,
             }
@@ -257,6 +290,10 @@ const fn entry_shape<'a>(shape: &'a Shape, entries: &'a [(&'static str, Node)], 
 const fn select_variant<'a>(repr: Repr, variants: &'a [Variant], node: &Node) -> Option<&'a Variant> {
     let Some(variant) = select_variant_locally(repr, variants, node) else { return None };
     let fits = match (repr, variant.payload, node) {
+        (Repr::External, None, Node::Map([(_, value)])) => matches!(value, Node::Null),
+        (Repr::Adjacent { content, .. }, None, Node::Map(entries)) => {
+            matches!(entry(entries, content), None | Some(Node::Null))
+        }
         (_, None, _) | (Repr::Untagged, _, _) | (Repr::Internal { .. }, Some(Shape::Any), _) => true,
         (Repr::External, Some(payload), Node::Map([(_, value)])) => conforms(payload, value),
         (Repr::Internal { tag }, Some(Shape::Table { fields, .. }), Node::Map(entries)) => {
@@ -264,7 +301,7 @@ const fn select_variant<'a>(repr: Repr, variants: &'a [Variant], node: &Node) ->
         }
         (Repr::Adjacent { content, .. }, Some(payload), Node::Map(entries)) => match entry(entries, content) {
             Some(value) => conforms(payload, value),
-            None => false,
+            None => accepts_missing(payload),
         },
         _ => false,
     };
@@ -278,10 +315,7 @@ const fn select_variant_locally<'a>(repr: Repr, variants: &'a [Variant], node: &
             Some(variant) if variant.payload.is_none() => Some(variant),
             _ => None,
         },
-        (Repr::External, Node::Map([(name, _)])) => match find_variant(variants, name) {
-            Some(variant) if variant.payload.is_some() => Some(variant),
-            _ => None,
-        },
+        (Repr::External, Node::Map([(name, _)])) => find_variant(variants, name),
         (Repr::Internal { tag }, Node::Map(entries)) => match tagged_variant(variants, entries, tag) {
             Some(variant) if matches!(variant.payload, None | Some(Shape::Table { .. } | Shape::Any)) => Some(variant),
             _ => None,
@@ -290,6 +324,19 @@ const fn select_variant_locally<'a>(repr: Repr, variants: &'a [Variant], node: &
         (Repr::Untagged, _) => untagged_variant(variants, node),
         _ => None,
     }
+}
+
+/// The tag `node` is written with when it names none of `variants`.
+const fn unknown_tag(repr: Repr, variants: &[Variant], node: &Node) -> Option<&'static str> {
+    let found = match (repr, node) {
+        (Repr::External, Node::Str(name) | Node::Map([(name, _)])) => name,
+        (Repr::Internal { tag } | Repr::Adjacent { tag, .. }, Node::Map(entries)) => match entry(entries, tag) {
+            Some(Node::Str(name)) => name,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    if find_variant(variants, found).is_none() { Some(found) } else { None }
 }
 
 /// The first variant whose payload `node` conforms to; a unit variant matches null.
@@ -347,18 +394,23 @@ const fn table_conforms(fields: &[Field], entries: &[(&str, Node)], ignore: Opti
 
 /// [`Verdict::Missing`] for the first required field absent from `entries`.
 ///
-/// A field is required unless it has a default or its shape accepts absence: `Option`, or [`Shape::Any`], whose
-/// `from_missing` cannot be known here.
+/// A field is required unless it has a default or its shape [accepts absence](accepts_missing).
 const fn missing(fields: &[Field], entries: &[(&str, Node)]) -> Verdict {
     let mut rest = fields;
     while let [field, tail @ ..] = rest {
-        let required = !field.has_default && !matches!(field.shape, Shape::Optional(_) | Shape::Any);
+        let required = !field.has_default && !accepts_missing(field.shape);
         if required && entry(entries, field.key).is_none() {
             return Verdict::Missing(field.key);
         }
         rest = tail;
     }
     Verdict::Ok
+}
+
+/// Whether a type of shape `shape` can be absent: `Option`, or [`Shape::Any`], whose `from_missing` cannot be known
+/// here.
+const fn accepts_missing(shape: &Shape) -> bool {
+    matches!(shape, Shape::Optional(_) | Shape::Any)
 }
 
 /// The shape of field `key`, or [`Shape::Any`] for a key the struct ignores.
@@ -655,7 +707,9 @@ mod tests {
         assert!(conforms(&EXTERNAL, &Node::Map(&[("Port", Node::Int(8))])));
         assert!(!conforms(&EXTERNAL, &Node::Map(&[("Port", Node::Str("8"))])));
         assert!(conforms(&EXTERNAL, &Node::Map(&[("Serve", SERVER_NODE)])));
-        assert!(!conforms(&EXTERNAL, &Node::Map(&[("Off", Node::Null)])));
+        // A unit variant may be written as a table with a null payload, as YAML's `!Off` lowers to.
+        assert!(conforms(&EXTERNAL, &Node::Map(&[("Off", Node::Null)])));
+        assert!(!conforms(&EXTERNAL, &Node::Map(&[("Off", Node::Int(1))])));
         assert!(!conforms(&EXTERNAL, &Node::Map(&[("Port", Node::Int(8)), ("Off", Node::Null)])));
         assert!(!conforms(&EXTERNAL, &Node::Null));
     }
@@ -677,12 +731,22 @@ mod tests {
 
     #[test]
     fn adjacent_enums() {
+        const MAYBE: Shape = Shape::Enum {
+            name: "Maybe",
+            repr: Repr::Adjacent { tag: "t", content: "c" },
+            variants: &[Variant { name: "Level", payload: Some(<Option<u8>>::SHAPE) }],
+        };
         assert!(conforms(&ADJACENT, &Node::Map(&[("t", Node::Str("Off"))])));
         assert!(conforms(&ADJACENT, &Node::Map(&[("t", Node::Str("Port")), ("c", Node::Int(1))])));
         assert!(!conforms(&ADJACENT, &Node::Map(&[("t", Node::Str("Port")), ("c", Node::Str("1"))])));
         assert!(!conforms(&ADJACENT, &Node::Map(&[("t", Node::Str("Port"))])));
         assert!(conforms(&ADJACENT, &Node::Map(&[("c", SERVER_NODE), ("t", Node::Str("Serve"))])));
         assert!(!conforms(&ADJACENT, &Node::Map(&[("c", Node::Int(1))])));
+        assert!(conforms(&ADJACENT, &Node::Map(&[("t", Node::Str("Off")), ("c", Node::Null)])));
+        assert!(!conforms(&ADJACENT, &Node::Map(&[("t", Node::Str("Off")), ("c", Node::Int(1))])));
+        // An absent content is fine for a payload that may be missing.
+        assert!(conforms(&MAYBE, &Node::Map(&[("t", Node::Str("Level"))])));
+        check_node(&MAYBE, &Node::Map(&[("t", Node::Str("Level"))]), &[], "at");
     }
 
     #[test]
@@ -805,12 +869,51 @@ mod tests {
         fails(<(u8, u8, u8)>::SHAPE, &Node::Seq(&[Node::Int(1)]), &[], "at: expected a sequence of 3 items, found 1");
         fails(<(u8,)>::SHAPE, &Node::Str("x"), &[], "at: expected sequence, found string");
         fails(&SERVER, &Node::Map(&[("port", Node::Int(1))]), &[], "at: missing required key `host`");
-        fails(&EXTERNAL, &Node::Str("Nope"), &[], "at: string matches no variant of Mode");
+        fails(
+            &EXTERNAL,
+            &Node::Str("Nope"),
+            &[],
+            "at: unknown variant `Nope` of Mode, expected one of `Off`, `Port`, `Serve`",
+        );
+        fails(
+            &EXTERNAL,
+            &Node::Map(&[("Nope", Node::Null)]),
+            &[],
+            "at: unknown variant `Nope` of Mode, expected one of `Off`, `Port`, `Serve`",
+        );
+        // A known name written in the wrong form, or no name at all.
+        fails(&EXTERNAL, &Node::Str("Port"), &[], "at: string matches no variant of Mode");
+        fails(&EXTERNAL, &Node::Map(&[]), &[], "at: table matches no variant of Mode");
         fails(&EXTERNAL, &Node::Int(1), &[], "at: integer matches no variant of Mode");
         fails(&INTERNAL, &Node::Map(&[("type", Node::Str("Serve"))]), &[], "at: missing required key `host`");
-        fails(&INTERNAL, &Node::Map(&[]), &[], "at: table matches no variant of Mode");
+        fails(
+            &INTERNAL,
+            &Node::Map(&[("type", Node::Str("On"))]),
+            &[],
+            "at: unknown variant `On` of Mode, expected one of `Off`, `Serve`",
+        );
+        fails(&INTERNAL, &Node::Map(&[]), &[], "at: missing required key `type`");
+        fails(&INTERNAL, &Node::Map(&[("type", Node::Int(1))]), &[], "at: table matches no variant of Mode");
+        fails(&INTERNAL, &Node::Str("Off"), &[], "at: string matches no variant of Mode");
+        fails(
+            &ADJACENT,
+            &Node::Map(&[("t", Node::Str("x")), ("c", Node::Null)]),
+            &[],
+            "at: unknown variant `x` of Mode, expected one of `Off`, `Port`, `Serve`",
+        );
+        fails(&ADJACENT, &Node::Map(&[("c", Node::Null)]), &[], "at: missing required key `t`");
+        // A unit variant's payload is checked as null.
+        fails(&EXTERNAL, &Node::Map(&[("Off", Node::Int(1))]), &[0], "at: expected null, found integer");
+        fails(
+            &ADJACENT,
+            &Node::Map(&[("t", Node::Str("Off")), ("c", Node::Int(1))]),
+            &[1],
+            "at: expected null, found integer",
+        );
+        assert_eq!(failure(&EXTERNAL, &Node::Map(&[("Off", Node::Int(1))]), &[]), None);
         fails(&ADJACENT, &Node::Map(&[("t", Node::Str("Port"))]), &[], "at: missing required key `c`");
         fails(&UNTAGGED, &Node::Bool(true), &[], "at: bool matches no variant of Mode");
+        fails(&UNTAGGED, &Node::Str("Nope"), &[], "at: string matches no variant of Mode");
     }
 
     #[test]
