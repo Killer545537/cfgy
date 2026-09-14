@@ -247,5 +247,6 @@ pub use cfgy_formats::Yaml;
 #[doc(hidden)]
 pub mod __private {
     pub use cfgy_core::DefaultFrom;
+    pub use cfgy_core::check::{Node, check_node};
     pub use cfgy_formats::select;
 }

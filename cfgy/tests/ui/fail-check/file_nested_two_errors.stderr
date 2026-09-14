@@ -1,0 +1,37 @@
+error[E0080]: evaluation panicked: fixtures/fail-check/file_nested_two_errors.toml:3:8: `primary.port`: expected u16, found string
+  --> tests/ui/fail-check/file_nested_two_errors.rs:11:17
+   |
+10 | #[derive(FromConfig)]
+   |          ---------- in this derive macro expansion
+11 | #[config(path = "fixtures/fail-check/file_nested_two_errors.toml")]
+   |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `_::_` failed inside this call
+   |
+note: inside `cfgy::__private::check_node`
+  --> $RUST/core/src/panic.rs
+   |
+   |         $crate::panicking::panic_display(&$arg);
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the failure occurred here
+   |
+  ::: $WORKSPACE/cfgy-core/src/check.rs
+   |
+   |     panic!("{}", message.as_str())
+   |     ------------------------------ in this macro invocation
+
+error[E0080]: evaluation panicked: fixtures/fail-check/file_nested_two_errors.toml:7:8: `replica.port`: 70000 is out of range for u16
+  --> tests/ui/fail-check/file_nested_two_errors.rs:11:17
+   |
+10 | #[derive(FromConfig)]
+   |          ---------- in this derive macro expansion
+11 | #[config(path = "fixtures/fail-check/file_nested_two_errors.toml")]
+   |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `_::_` failed inside this call
+   |
+note: inside `cfgy::__private::check_node`
+  --> $RUST/core/src/panic.rs
+   |
+   |         $crate::panicking::panic_display(&$arg);
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the failure occurred here
+   |
+  ::: $WORKSPACE/cfgy-core/src/check.rs
+   |
+   |     panic!("{}", message.as_str())
+   |     ------------------------------ in this macro invocation

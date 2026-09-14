@@ -1,0 +1,9 @@
+name = "root"
+
+[[children]]
+name = "a"
+children = [{ name = "a1", children = [] }]
+
+[[children]]
+name = "b"
+children = []

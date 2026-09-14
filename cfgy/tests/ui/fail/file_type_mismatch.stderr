@@ -1,5 +1,0 @@
-error: fixtures/fail/file_type_mismatch.toml: `port`: expected u16, found string
- --> tests/ui/fail/file_type_mismatch.rs:4:17
-  |
-4 | #[config(path = "fixtures/fail/file_type_mismatch.toml")]
-  |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

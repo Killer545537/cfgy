@@ -1,32 +1,63 @@
-//! Compile-time check: the config file's parsed [`Value`] is type-checked against the field plan.
+//! Compile-time check: the config file is embedded as a const [`Node`](cfgy_core::check::Node) document, and every
+//! value in it is asserted against `<Root as FromValue>::SHAPE` in const evaluation.
+//!
+//! The type system resolves the shape, so aliases, nested structs, custom `FromValue` impls and recursive types are
+//! checked by what they are rather than by how their names are spelled.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::{env, fs, io};
 
-use cfgy_core::{ConfigError, Datetime, FromValue, PathStack, Value};
-use syn::{GenericArgument, LitStr, PathArguments, PathSegment, Type};
+use cfgy_core::{Datetime, PathStack, Spans, Value, line_col};
+use proc_macro2::{Ident, Literal, Span, TokenStream as TokenStream2};
+use quote::{ToTokens, quote, quote_spanned};
+use syn::LitStr;
 
-use crate::plan::{FieldPlan, SourcePlan, StructKind, StructPlan};
+use crate::plan::{SourcePlan, StructPlan};
 
-/// Reads, parses, and type-checks the config file of `plan`, unless it has no `path` or sets `check = false`.
-///
-/// Returns the resolved path of the checked file, so the caller can register it as a build dependency.
-pub fn check(plan: &StructPlan) -> syn::Result<Option<PathBuf>> {
+/// Reads and parses the config file of `plan` and emits its compile-time check, unless it has no `path` or sets
+/// `check = false`.
+pub fn check(plan: &StructPlan) -> syn::Result<TokenStream2> {
     let Some(source) = plan.source.as_ref().filter(|source| source.check) else {
-        return Ok(None);
+        return Ok(TokenStream2::new());
     };
-    // The plan rejects `path` on any other kind of struct.
-    let StructKind::Named(fields) = &plan.kind else { return Ok(None) };
     let manifest_dir = env::var_os("CARGO_MANIFEST_DIR")
         .ok_or_else(|| syn::Error::new(source.path.span(), "`CARGO_MANIFEST_DIR` is not set"))?;
-    check_source(Path::new(&manifest_dir), source, fields).map(Some)
+    check_source(Path::new(&manifest_dir), source, &plan.ident)
 }
 
-/// Checks the file `source` points at, relative to `manifest_dir`, with every error spanned on its `path` literal.
+/// Checks the file `source` points at, relative to `manifest_dir`, against the `FromValue::SHAPE` of `ident`.
+///
+/// A file that cannot be read or parsed is a `syn` error on the `path` literal. A parsed file becomes one block:
+///
+/// ```ignore
+/// const _: () = {
+///     const _: &str = ::core::include_str!("/abs/path/config.toml");
+///     const __CFGY_DOC: ::cfgy::__private::Node = ::cfgy::__private::Node::Map(&[("port", ..)]);
+///     const _: () = ::cfgy::__private::check_node(
+///         <Settings as ::cfgy::FromValue>::SHAPE, &__CFGY_DOC, &[], "config.toml:1:1: `<root>`",
+///     );
+///     const _: () = ::cfgy::__private::check_node(
+///         <Settings as ::cfgy::FromValue>::SHAPE, &__CFGY_DOC, &[0], "config.toml:1:8: `port`",
+///     );
+/// };
+/// ```
+///
+/// - The `include_str!` is unused, but it makes Cargo rebuild when the file changes; without it the check would
+///   validate a stale file.
+/// - The outer `const _` scopes `__CFGY_DOC`, so several checked structs can share a module.
+/// - rustc evaluates each inner `const _` separately, so every mismatch in the file is reported, not just the first.
+///   `check_node` stays quiet below a mismatched ancestor, so one mistake is one error.
+/// - A message starts with the value's `file:line:col` and its path, rendered as runtime errors render it:
+///   `database.replicas[1].port`, or `<root>` for the whole document. A missing key is reported at its table.
+/// - The consts are located at the `path` literal, which is where rustc points their errors.
+/// - `__CFGY_DOC` allows `clippy::approx_constant`, the one lint a copied value (`pi = 3.14159`) trips.
 ///
 /// Messages name the file as written in the attribute, not the resolved absolute path, so they read the same on
 /// every machine.
-pub fn check_source(manifest_dir: &Path, source: &SourcePlan, fields: &[FieldPlan]) -> syn::Result<PathBuf> {
+///
+/// ponytail: one const per value, so compile time grows with the size of the config file; fine for hand-written
+/// configs. Upgrade path: one const per table, or a single const returning the first failing index.
+pub fn check_source(manifest_dir: &Path, source: &SourcePlan, ident: &Ident) -> syn::Result<TokenStream2> {
     let file = source.path.value();
     let resolved = manifest_dir.join(&file);
     let error = |message: String| syn::Error::new(source.path.span(), message);
@@ -37,174 +68,133 @@ pub fn check_source(manifest_dir: &Path, source: &SourcePlan, fields: &[FieldPla
     })?;
     let format = cfgy_formats::select(source.format.as_ref().map(LitStr::value).as_deref(), &resolved, &text)
         .map_err(|err| error(format!("config file `{file}`: {err}")))?;
-    let value = format.parse(&text).map(|parsed| parsed.value).map_err(|err| match err.line_col(&text) {
+    let parsed = format.parse(&text).map_err(|err| match err.line_col(&text) {
         Some((line, col)) => error(format!("{file}:{line}:{col}: {}", err.message)),
         None => error(format!("{file}: {}", err.message)),
     })?;
 
-    check_fields(fields, &value)
-        .into_iter()
-        .map(|message| error(format!("{file}: {message}")))
-        .reduce(|mut all, next| {
-            all.combine(next);
-            all
-        })
-        .map_or(Ok(resolved), Err)
+    // Located at the literal but resolved at the call site, so lints keep treating the consts as macro output.
+    let span = Span::call_site().located_at(source.path.span());
+    let resolved = LitStr::new(&resolved.to_string_lossy(), span);
+    let document = document(&parsed.value);
+    let mut collector =
+        Collector { file: &file, text: &text, spans: &parsed.spans, indices: Vec::new(), checks: Vec::new() };
+    collector.visit(&parsed.value, &mut PathStack::new());
+    let checks = collector.checks.into_iter().map(|Check { indices, prefix }| {
+        let indices = indices.into_iter().map(Literal::usize_unsuffixed);
+        quote_spanned! {span=>
+            const _: () = ::cfgy::__private::check_node(
+                <#ident as ::cfgy::FromValue>::SHAPE,
+                &__CFGY_DOC,
+                &[#(#indices),*],
+                #prefix,
+            );
+        }
+    });
+    Ok(quote_spanned! {span=>
+        const _: () = {
+            const _: &str = ::core::include_str!(#resolved);
+            #[allow(clippy::approx_constant, reason = "values copied from the config file, such as `pi = 3.14159`")]
+            const __CFGY_DOC: ::cfgy::__private::Node = #document;
+            #(#checks)*
+        };
+    })
 }
 
-/// Checks `root` against `fields`, returning every error message rather than stopping at the first.
-pub fn check_fields(fields: &[FieldPlan], root: &Value) -> Vec<String> {
-    let mut path = PathStack::new();
-    let Value::Map(map) = root else {
-        return vec![ConfigError::type_mismatch(&path, "table", root).to_string()];
-    };
-    let mut errors = Vec::new();
-    for field in fields {
-        let optional = option_inner(&field.ty);
-        let required = optional.is_none() && field.default.is_none();
-        path.with_key(&field.key, |path| match map.get(&field.key) {
-            None if required => errors.push(ConfigError::missing(path).to_string()),
-            Some(Value::Null) if optional.is_some() => {}
-            Some(_) if field.unchecked => {}
-            None => {}
-            Some(value) => check_type(optional.unwrap_or(&field.ty), value, path, &mut errors),
-        });
-    }
-    errors
+/// One `check_node` assertion: the value's position below the root, and the start of its failure message.
+#[derive(Debug, PartialEq, Eq)]
+struct Check {
+    indices: Vec<usize>,
+    prefix: String,
 }
 
-/// Checks `value` against `ty` by the type's syntax, pushing a message per mismatch onto `errors`.
-///
-/// Leaf scalars go through the runtime [`FromValue`] impls, so both phases share one coercion policy.
-fn check_type(ty: &Type, value: &Value, path: &mut PathStack, errors: &mut Vec<String>) {
-    let mut push = |result: Result<(), ConfigError>| {
-        if let Err(error) = result {
-            errors.push(error.to_string());
-        }
-    };
-    let segment = match ty {
-        Type::Group(group) => return check_type(&group.elem, value, path, errors),
-        Type::Paren(paren) => return check_type(&paren.elem, value, path, errors),
-        Type::Tuple(tuple) => {
-            let Value::Seq(items) = value else {
-                return push(Err(ConfigError::type_mismatch(path, "sequence", value)));
-            };
-            if items.len() != tuple.elems.len() {
-                return push(Err(ConfigError::length(path, tuple.elems.len(), items.len())));
-            }
-            for (index, (elem, item)) in tuple.elems.iter().zip(items).enumerate() {
-                path.with_index(index, |path| check_type(elem, item, path, errors));
-            }
-            return;
-        }
-        Type::Path(type_path) if type_path.qself.is_none() => match type_path.path.segments.last() {
-            Some(segment) => segment,
-            None => return,
-        },
-        // References, arrays, slices, trait objects, `<T as Trait>::Assoc`, ...: no runtime impl to mirror, so
-        // leave them to rustc.
-        _ => return,
-    };
-    match segment.ident.to_string().as_str() {
-        "i8" => push(leaf::<i8>(value, path)),
-        "i16" => push(leaf::<i16>(value, path)),
-        "i32" => push(leaf::<i32>(value, path)),
-        "i64" => push(leaf::<i64>(value, path)),
-        "i128" => push(leaf::<i128>(value, path)),
-        "isize" => push(leaf::<isize>(value, path)),
-        "u8" => push(leaf::<u8>(value, path)),
-        "u16" => push(leaf::<u16>(value, path)),
-        "u32" => push(leaf::<u32>(value, path)),
-        "u64" => push(leaf::<u64>(value, path)),
-        "u128" => push(leaf::<u128>(value, path)),
-        "usize" => push(leaf::<usize>(value, path)),
-        "f32" => push(leaf::<f32>(value, path)),
-        "f64" => push(leaf::<f64>(value, path)),
-        "bool" => push(leaf::<bool>(value, path)),
-        "String" => push(leaf::<String>(value, path)),
-        "PathBuf" => push(leaf::<PathBuf>(value, path)),
-        "char" => push(leaf::<char>(value, path)),
-        "Datetime" => push(leaf::<Datetime>(value, path)),
-        "Box" | "Rc" | "Arc" => {
-            if let Some(inner) = type_arg(segment, 0) {
-                check_type(inner, value, path, errors);
-            }
-        }
-        "Option" => match (value, type_arg(segment, 0)) {
-            (Value::Null, _) | (_, None) => {}
-            (_, Some(inner)) => check_type(inner, value, path, errors),
-        },
-        "Vec" | "VecDeque" | "HashSet" => {
-            let Value::Seq(items) = value else {
-                return push(Err(ConfigError::type_mismatch(path, "sequence", value)));
-            };
-            if let Some(inner) = type_arg(segment, 0) {
+/// Walks a parsed file, producing one [`Check`] per value.
+struct Collector<'a> {
+    file: &'a str,
+    text: &'a str,
+    spans: &'a Spans,
+    /// Positions from the root to the value being visited.
+    indices: Vec<usize>,
+    checks: Vec<Check>,
+}
+
+impl Collector<'_> {
+    /// Pushes a check for `value`, at `path`, then for everything below it; parents come before their children.
+    fn visit(&mut self, value: &Value, path: &mut PathStack) {
+        self.checks.push(Check { indices: self.indices.clone(), prefix: self.prefix(path) });
+        match value {
+            Value::Seq(items) => {
                 for (index, item) in items.iter().enumerate() {
-                    path.with_index(index, |path| check_type(inner, item, path, errors));
+                    self.indices.push(index);
+                    path.with_index(index, |path| self.visit(item, path));
+                    self.indices.pop();
                 }
             }
-        }
-        "HashMap" | "BTreeMap" | "IndexMap" => {
-            let Value::Map(entries) = value else {
-                return push(Err(ConfigError::type_mismatch(path, "table", value)));
-            };
-            if let Some(inner) = type_arg(segment, 1) {
-                for (key, item) in entries {
-                    path.with_key(key, |path| check_type(inner, item, path, errors));
+            Value::Map(entries) => {
+                for (index, (key, item)) in entries.iter().enumerate() {
+                    self.indices.push(index);
+                    path.with_key(key, |path| self.visit(item, path));
+                    self.indices.pop();
                 }
             }
+            Value::Null | Value::Bool(_) | Value::Int(_) | Value::Float(_) | Value::Str(_) | Value::Datetime(_) => {}
         }
-        // ponytail: any other type path is assumed to be a struct deriving `FromConfig` and is only required to be a
-        // table; its fields are not checked, so nested struct errors (and type aliases of scalars) surface at runtime
-        // or wrongly here. Upgrade path: have the derive emit a per-type `const SHAPE` and check against that instead.
-        _ => {
-            if !matches!(value, Value::Map(_)) {
-                push(Err(ConfigError::type_mismatch(path, "table", value)));
-            }
+    }
+
+    /// `` file:line:col: `path` ``, or `` file: `path` `` for a value without a span.
+    fn prefix(&self, path: &PathStack) -> String {
+        let file = self.file;
+        let rendered = if path.segments().is_empty() { "<root>".to_owned() } else { path.to_string() };
+        match self.spans.get(path.segments()).and_then(|range| line_col(self.text, range.start)) {
+            Some((line, col)) => format!("{file}:{line}:{col}: `{rendered}`"),
+            None => format!("{file}: `{rendered}`"),
         }
     }
 }
 
-/// Returns `T` if `ty` is syntactically `Option<T>`, `std::option::Option<T>` or `core::option::Option<T>`.
+/// `value` as an expression building a `::cfgy::__private::Node`, for a const initializer.
 ///
-/// ponytail: syntactic, so `type MaybePort = Option<u16>` counts as required here even though it loads fine; goes
-/// away when this check is rebuilt on `FromValue::SHAPE`.
-fn option_inner(ty: &Type) -> Option<&Type> {
-    let path = match ty {
-        Type::Group(group) => return option_inner(&group.elem),
-        Type::Path(type_path) if type_path.qself.is_none() => &type_path.path,
-        _ => return None,
-    };
-    let idents: Vec<String> = path.segments.iter().map(|segment| segment.ident.to_string()).collect();
-    let idents: Vec<&str> = idents.iter().map(String::as_str).collect();
-    let prefix_is_bare = path.segments.iter().rev().skip(1).all(|segment| segment.arguments.is_none());
-    if !prefix_is_bare || !matches!(idents.as_slice(), ["Option"] | ["std" | "core", "option", "Option"]) {
-        return None;
-    }
-    let PathArguments::AngleBracketed(generics) = &path.segments.last()?.arguments else { return None };
-    let mut args = generics.args.iter();
-    match (args.next(), args.next()) {
-        (Some(GenericArgument::Type(inner)), None) => Some(inner),
-        _ => None,
+/// Nested slices are written as `&[..]` and promoted to `'static` by the const they initialize.
+pub fn document(value: &Value) -> TokenStream2 {
+    match value {
+        Value::Null => quote! { ::cfgy::__private::Node::Null },
+        Value::Bool(b) => quote! { ::cfgy::__private::Node::Bool(#b) },
+        Value::Int(i) => {
+            let i = Literal::i128_suffixed(*i);
+            quote! { ::cfgy::__private::Node::Int(#i) }
+        }
+        Value::Float(f) => {
+            let f = float(*f);
+            quote! { ::cfgy::__private::Node::Float(#f) }
+        }
+        Value::Str(s) => quote! { ::cfgy::__private::Node::Str(#s) },
+        Value::Datetime(Datetime(s)) => quote! { ::cfgy::__private::Node::Datetime(#s) },
+        Value::Seq(items) => {
+            let items = items.iter().map(document);
+            quote! { ::cfgy::__private::Node::Seq(&[#(#items),*]) }
+        }
+        Value::Map(entries) => {
+            let entries = entries.iter().map(|(key, value)| {
+                let value = document(value);
+                quote! { (#key, #value) }
+            });
+            quote! { ::cfgy::__private::Node::Map(&[#(#entries),*]) }
+        }
     }
 }
 
-/// Converts `value` with the runtime impl for `T`, keeping only the error.
-fn leaf<T: FromValue>(value: &Value, path: &mut PathStack) -> Result<(), ConfigError> {
-    T::from_value(value, path).map(drop)
-}
-
-/// The `index`th type argument of `segment`, e.g. `V` at index 1 of `HashMap<K, V>`.
-fn type_arg(segment: &PathSegment, index: usize) -> Option<&Type> {
-    let PathArguments::AngleBracketed(generics) = &segment.arguments else { return None };
-    generics
-        .args
-        .iter()
-        .filter_map(|arg| match arg {
-            GenericArgument::Type(ty) => Some(ty),
-            _ => None,
-        })
-        .nth(index)
+/// An `f64` expression for `f`: a suffixed literal, or the named constant for NaN and the infinities, which have no
+/// literal form.
+fn float(f: f64) -> TokenStream2 {
+    if f.is_nan() {
+        quote! { ::core::primitive::f64::NAN }
+    } else if f == f64::INFINITY {
+        quote! { ::core::primitive::f64::INFINITY }
+    } else if f == f64::NEG_INFINITY {
+        quote! { ::core::primitive::f64::NEG_INFINITY }
+    } else {
+        Literal::f64_suffixed(f).into_token_stream()
+    }
 }
 
 #[cfg(test)]
@@ -212,29 +202,11 @@ mod tests {
     use super::*;
     use crate::plan;
     use cfgy_core::IndexMap;
-    use syn::{DeriveInput, parse_quote};
-
-    const NONE: [String; 0] = [];
+    use std::path::PathBuf;
+    use syn::parse_quote;
 
     fn map(entries: &[(&str, Value)]) -> Value {
         Value::Map(entries.iter().map(|(k, v)| ((*k).to_owned(), v.clone())).collect::<IndexMap<_, _>>())
-    }
-
-    fn named(plan: StructPlan) -> Vec<FieldPlan> {
-        match plan.kind {
-            StructKind::Named(fields) => fields,
-            _ => panic!("expected a struct with named fields"),
-        }
-    }
-
-    fn errors(input: &DeriveInput, root: &Value) -> Vec<String> {
-        check_fields(&named(plan::build(input).unwrap()), root)
-    }
-
-    fn one_error(input: &DeriveInput, root: &Value) -> String {
-        let errors = errors(input, root);
-        assert_eq!(errors.len(), 1, "{errors:?}");
-        errors.into_iter().next().unwrap()
     }
 
     /// A fresh directory holding `name` with `contents`, unique per test process and name.
@@ -246,196 +218,185 @@ mod tests {
     }
 
     fn source(path: &str) -> SourcePlan {
-        SourcePlan { path: LitStr::new(path, proc_macro2::Span::call_site()), format: None, check: true }
+        SourcePlan { path: LitStr::new(path, Span::call_site()), format: None, check: true }
     }
 
-    fn check_file(name: &str, contents: &str, input: &DeriveInput) -> Vec<String> {
-        let fields = named(plan::build(input).unwrap());
-        match check_source(&manifest_dir(name, contents), &source(name), &fields) {
-            Ok(_) => Vec::new(),
-            Err(err) => err.into_iter().map(|err| err.to_string()).collect(),
-        }
-    }
-    #[test]
-    fn string_into_u16_fails_with_key() {
-        let msg = one_error(&parse_quote! { struct S { port: u16 } }, &map(&[("port", Value::Str("eighty".into()))]));
-        assert!(msg.contains("port"), "{msg}");
-        assert!(msg.contains("found string"), "{msg}");
+    fn ident() -> Ident {
+        Ident::new("Settings", Span::call_site())
     }
 
-    #[test]
-    fn out_of_range_fails() {
-        let msg = one_error(&parse_quote! { struct S { port: u16 } }, &map(&[("port", Value::Int(70000))]));
-        assert_eq!(msg, "`port`: 70000 is out of range for u16");
+    /// The tokens emitted for a file `name` holding `contents`, or the error messages.
+    fn check_file(name: &str, contents: &str) -> Result<String, Vec<String>> {
+        check_source(&manifest_dir(name, contents), &source(name), &ident())
+            .map(|tokens| tokens.to_string())
+            .map_err(|err| err.into_iter().map(|err| err.to_string()).collect())
     }
 
-    #[test]
-    fn float_into_int_fails_but_int_into_float_passes() {
-        let input = parse_quote! { struct S { a: i32, b: f64 } };
-        let msg = one_error(&input, &map(&[("a", Value::Float(1.0)), ("b", Value::Int(1))]));
-        assert_eq!(msg, "`a`: expected i32, found float");
-    }
-
-    #[test]
-    fn missing_required_key() {
-        let msg = one_error(&parse_quote! { struct S { port: u16 } }, &map(&[]));
-        assert_eq!(msg, "missing required key `port`");
-    }
-
-    #[test]
-    fn missing_key_with_default_or_option_passes() {
-        let input = parse_quote! {
-            struct S {
-                a: Option<u16>,
-                #[config(default = 1)]
-                b: u16,
-            }
-        };
-        assert_eq!(errors(&input, &map(&[])), NONE);
-    }
-
-    #[test]
-    fn null_is_an_error_only_for_non_option_fields() {
-        let input = parse_quote! { struct S { a: Option<u16>, b: u16 } };
-        let msg = one_error(&input, &map(&[("a", Value::Null), ("b", Value::Null)]));
-        assert!(msg.starts_with("`b`:") && msg.contains("null"), "{msg}");
-    }
-
-    #[test]
-    fn vec_element_error_has_index() {
-        let root = map(&[("ports", Value::Seq(vec![Value::Int(1), Value::Str("x".into())]))]);
-        let msg = one_error(&parse_quote! { struct S { ports: Vec<u16> } }, &root);
-        assert!(msg.contains("ports[1]"), "{msg}");
-    }
-
-    #[test]
-    fn nested_option_accepts_null() {
-        let root = map(&[("ports", Value::Seq(vec![Value::Null, Value::Int(1)]))]);
-        assert_eq!(errors(&parse_quote! { struct S { ports: Vec<Option<u16>> } }, &root), NONE);
-    }
-
-    #[test]
-    fn map_value_error_has_key() {
-        let root = map(&[("features", map(&[("a", Value::Bool(true)), ("b", Value::Int(1))]))]);
-        let msg = one_error(&parse_quote! { struct S { features: std::collections::HashMap<String, bool> } }, &root);
-        assert_eq!(msg, "`features.b`: expected bool, found integer");
-    }
-
-    #[test]
-    fn tuple_checks_length_and_elements() {
-        let input = parse_quote! { struct S { t: (u8, Box<String>) } };
-        assert_eq!(errors(&input, &map(&[("t", Value::Seq(vec![Value::Int(1), Value::Str("a".into())]))])), NONE);
-        let msg = one_error(&input, &map(&[("t", Value::Seq(vec![Value::Int(1)]))]));
-        assert!(msg.contains("expected a sequence of 2 items, found 1"), "{msg}");
-        let msg = one_error(&input, &map(&[("t", Value::Seq(vec![Value::Int(1), Value::Int(2)]))]));
-        assert_eq!(msg, "`t[1]`: expected string, found integer");
-    }
-
-    #[test]
-    fn unknown_struct_type_only_requires_a_table() {
-        let input = parse_quote! { struct S { database: Database } };
-        assert_eq!(errors(&input, &map(&[("database", map(&[("port", Value::Str("x".into()))]))])), NONE);
-        let msg = one_error(&input, &map(&[("database", Value::Str("x".into()))]));
-        assert_eq!(msg, "`database`: expected table, found string");
-    }
-
-    #[test]
-    fn root_must_be_a_table() {
-        assert_eq!(
-            one_error(&parse_quote! { struct S { a: u8 } }, &Value::Seq(vec![])),
-            "`<root>`: expected table, found sequence"
-        );
-    }
-
-    #[test]
-    fn collects_every_error() {
-        let input = parse_quote! { struct S { host: String, port: u16 } };
-        let errors = errors(&input, &map(&[("host", Value::Int(1)), ("port", Value::Bool(true))]));
-        assert_eq!(errors, ["`host`: expected string, found integer", "`port`: expected u16, found bool"]);
-    }
-
-    #[test]
-    fn unchecked_field_value_is_not_checked_but_still_required() {
-        let input = parse_quote! { struct S { #[config(unchecked)] port: u16 } };
-        assert_eq!(errors(&input, &map(&[("port", Value::Str("x".into()))])), NONE);
-        assert_eq!(one_error(&input, &map(&[])), "missing required key `port`");
-    }
-
-    #[test]
-    fn peels_option() {
-        let peeled = |ty: Type| option_inner(&ty).cloned();
-        let u8_ty: Type = parse_quote!(u8);
-        let vec_ty: Type = parse_quote!(Vec<u8>);
-        assert_eq!(peeled(parse_quote!(Option<u8>)), Some(u8_ty.clone()));
-        assert_eq!(peeled(parse_quote!(std::option::Option<u8>)), Some(u8_ty.clone()));
-        assert_eq!(peeled(parse_quote!(::core::option::Option<u8>)), Some(u8_ty));
-        assert_eq!(peeled(parse_quote!(Option<Vec<u8>>)), Some(vec_ty));
-        assert_eq!(peeled(parse_quote!(Vec<Option<u8>>)), None);
-        assert_eq!(peeled(parse_quote!(u8)), None);
-        assert_eq!(peeled(parse_quote!(foo::Option<u8>)), None);
+    /// The checks for a value parsed from `text` with `spans`.
+    fn checks(value: &Value, text: &str, spans: &Spans) -> Vec<(Vec<usize>, String)> {
+        let mut collector = Collector { file: "c.toml", text, spans, indices: Vec::new(), checks: Vec::new() };
+        collector.visit(value, &mut PathStack::new());
+        collector.checks.into_iter().map(|check| (check.indices, check.prefix)).collect()
     }
 
     #[test]
     fn missing_file_fails() {
         let dir = manifest_dir("other.txt", "");
-        let err = check_source(&dir, &source("missing.toml"), &[]).unwrap_err().to_string();
+        let err = check_source(&dir, &source("missing.toml"), &ident()).unwrap_err().to_string();
         assert_eq!(err, "config file `missing.toml` does not exist");
     }
 
     #[test]
     fn unknown_extension_fails() {
-        let errors = check_file("config.ini", "a = 1", &parse_quote! { struct S {} });
+        let errors = check_file("config.ini", "a = 1").unwrap_err();
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert!(errors[0].contains("unknown extension `.ini`"), "{errors:?}");
     }
 
     #[test]
-    fn check_false_skips_missing_file() {
+    fn no_path_or_check_false_emits_nothing() {
         let input = parse_quote! {
             #[config(path = "does/not/exist.toml", check = false)]
             struct S { port: u16 }
         };
-        assert!(check(&plan::build(&input).unwrap()).is_ok());
-        assert!(check(&plan::build(&parse_quote! { struct S { port: u16 } }).unwrap()).is_ok());
+        assert!(check(&plan::build(&input).unwrap()).unwrap().is_empty());
+        assert!(check(&plan::build(&parse_quote! { struct S { port: u16 } }).unwrap()).unwrap().is_empty());
     }
 
     #[cfg(feature = "toml")]
     #[test]
     fn malformed_toml_reports_line_and_col() {
-        let dir = manifest_dir("bad.toml", "a = 1\nb = = 2");
-        let err = check_source(&dir, &source("bad.toml"), &[]).unwrap_err().to_string();
-        assert!(err.starts_with("bad.toml:2:5: "), "{err}");
+        let errors = check_file("bad.toml", "a = 1\nb = = 2").unwrap_err();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].starts_with("bad.toml:2:5: "), "{errors:?}");
     }
 
     #[cfg(feature = "toml")]
     #[test]
-    fn valid_file_passes() {
-        let input = parse_quote! { struct S { host: String, port: u16, database: Database } };
-        let errors = check_file("ok.toml", "host = \"localhost\"\nport = 8080\n[database]\nurl = 1\n", &input);
-        assert_eq!(errors, NONE);
-        let dir = manifest_dir("ok.toml", "host = \"a\"\nport = 1\n[database]\n");
-        let fields = named(plan::build(&input).unwrap());
-        assert_eq!(check_source(&dir, &source("ok.toml"), &fields).unwrap(), dir.join("ok.toml"));
+    fn emits_the_document_and_one_check_per_value() {
+        let dir = manifest_dir("ok.toml", "port = \"x\"\n[database]\nurl = 1\n");
+        let out = check_source(&dir, &source("ok.toml"), &ident()).unwrap().to_string();
+        let resolved = LitStr::new(&dir.join("ok.toml").to_string_lossy(), Span::call_site()).to_token_stream();
+        let check = |indices: &str, prefix: &str| {
+            format!(
+                "const _ : () = :: cfgy :: __private :: check_node (< Settings as :: cfgy :: FromValue > :: SHAPE , \
+                 & __CFGY_DOC , & [{indices}] , \"{prefix}\" ,) ;"
+            )
+        };
+        let expected = format!(
+            "const _ : () = {{ const _ : & str = :: core :: include_str ! ({resolved}) ; # [allow (clippy :: \
+             approx_constant , reason = \"values copied from the config file, such as `pi = 3.14159`\")] const \
+             __CFGY_DOC : :: cfgy :: __private :: Node = {doc} ; {} {} {} {} }} ;",
+            check("", "ok.toml:1:1: `<root>`"),
+            check("0", "ok.toml:1:8: `port`"),
+            check("1", "ok.toml:2:1: `database`"),
+            check("1 , 0", "ok.toml:3:7: `database.url`"),
+            doc = doc(&map(&[("port", Value::Str("x".into())), ("database", map(&[("url", Value::Int(1))]))])),
+        );
+        assert_eq!(out, expected);
+        syn::parse2::<syn::File>(check_source(&dir, &source("ok.toml"), &ident()).unwrap()).unwrap();
     }
 
     #[cfg(feature = "toml")]
     #[test]
-    fn type_errors_in_file_fail() {
-        let input = parse_quote! { struct S { host: String, port: u16 } };
-        let errors = check_file("types.toml", "port = \"eighty\"\n", &input);
-        assert_eq!(errors.len(), 2, "{errors:?}");
-        assert!(errors[0].ends_with("types.toml: missing required key `host`"), "{errors:?}");
-        assert!(errors[1].ends_with("types.toml: `port`: expected u16, found string"), "{errors:?}");
+    fn check_paths_follow_sequences_and_tables() {
+        let text = "[[servers]]\nport = 1\n[[servers]]\nhost = \"a\"\nport = \"x\"\n";
+        let parsed = cfgy_core::Format::parse(&cfgy_formats::Toml, text).unwrap();
+        assert_eq!(
+            checks(&parsed.value, text, &parsed.spans),
+            [
+                (vec![], "c.toml:1:1: `<root>`".to_owned()),
+                (vec![0], "c.toml:1:1: `servers`".to_owned()),
+                (vec![0, 0], "c.toml:1:1: `servers[0]`".to_owned()),
+                (vec![0, 0, 0], "c.toml:2:8: `servers[0].port`".to_owned()),
+                (vec![0, 1], "c.toml:3:1: `servers[1]`".to_owned()),
+                (vec![0, 1, 0], "c.toml:4:8: `servers[1].host`".to_owned()),
+                (vec![0, 1, 1], "c.toml:5:8: `servers[1].port`".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn check_without_a_span_names_only_the_file_and_path() {
+        let value = map(&[("a", Value::Seq(vec![Value::Null]))]);
+        assert_eq!(
+            checks(&value, "", &Spans::default()),
+            [
+                (vec![], "c.toml: `<root>`".to_owned()),
+                (vec![0], "c.toml: `a`".to_owned()),
+                (vec![0, 0], "c.toml: `a[0]`".to_owned()),
+            ]
+        );
     }
 
     #[cfg(feature = "json")]
     #[test]
     fn explicit_format_overrides_extension() {
         let mut source = source("config.txt");
-        source.format = Some(LitStr::new("json", proc_macro2::Span::call_site()));
-        let fields = named(plan::build(&parse_quote! { struct S { port: u16 } }).unwrap());
-        let dir = manifest_dir("config.txt", r#"{"port": true}"#);
-        let err = check_source(&dir, &source, &fields).unwrap_err().to_string();
-        assert!(err.ends_with("`port`: expected u16, found bool"), "{err}");
+        source.format = Some(LitStr::new("json", Span::call_site()));
+        let dir = manifest_dir("config.txt", "{\n  \"port\": true\n}");
+        let out = check_source(&dir, &source, &ident()).unwrap().to_string();
+        assert!(out.contains("\"config.txt:2:11: `port`\""), "{out}");
+    }
+
+    fn doc(value: &Value) -> String {
+        document(value).to_string()
+    }
+
+    #[test]
+    fn document_scalars() {
+        assert_eq!(doc(&Value::Null), ":: cfgy :: __private :: Node :: Null");
+        assert_eq!(doc(&Value::Bool(true)), ":: cfgy :: __private :: Node :: Bool (true)");
+        assert_eq!(doc(&Value::Int(8080)), ":: cfgy :: __private :: Node :: Int (8080i128)");
+        assert_eq!(doc(&Value::Int(-3)), ":: cfgy :: __private :: Node :: Int (- 3i128)");
+        assert_eq!(
+            doc(&Value::Int(i128::from(u64::MAX))),
+            ":: cfgy :: __private :: Node :: Int (18446744073709551615i128)"
+        );
+        assert_eq!(doc(&Value::Str("a \"b\"\n".into())), r#":: cfgy :: __private :: Node :: Str ("a \"b\"\n")"#);
+        assert_eq!(
+            doc(&Value::Datetime(Datetime("1979-05-27T07:32:00Z".into()))),
+            r#":: cfgy :: __private :: Node :: Datetime ("1979-05-27T07:32:00Z")"#
+        );
+    }
+
+    #[test]
+    fn document_floats() {
+        assert_eq!(doc(&Value::Float(1.5)), ":: cfgy :: __private :: Node :: Float (1.5f64)");
+        assert_eq!(doc(&Value::Float(-0.25)), ":: cfgy :: __private :: Node :: Float (- 0.25f64)");
+        assert_eq!(doc(&Value::Float(3.0)), ":: cfgy :: __private :: Node :: Float (3f64)");
+        assert_eq!(
+            doc(&Value::Float(f64::NAN)),
+            ":: cfgy :: __private :: Node :: Float (:: core :: primitive :: f64 :: NAN)"
+        );
+        assert_eq!(
+            doc(&Value::Float(f64::INFINITY)),
+            ":: cfgy :: __private :: Node :: Float (:: core :: primitive :: f64 :: INFINITY)"
+        );
+        assert_eq!(
+            doc(&Value::Float(f64::NEG_INFINITY)),
+            ":: cfgy :: __private :: Node :: Float (:: core :: primitive :: f64 :: NEG_INFINITY)"
+        );
+        // Shortest round-trip text, so the const holds exactly the parsed value.
+        let parsed: f64 = Literal::f64_suffixed(0.1 + 0.2).to_string().trim_end_matches("f64").parse().unwrap();
+        assert_eq!(parsed.to_bits(), (0.1_f64 + 0.2).to_bits());
+    }
+
+    #[test]
+    fn document_containers_keep_order() {
+        let value = map(&[
+            ("b", Value::Seq(vec![Value::Int(1), map(&[("x", Value::Null)])])),
+            ("a", Value::Seq(vec![])),
+            ("c", map(&[])),
+        ]);
+        assert_eq!(
+            doc(&value),
+            ":: cfgy :: __private :: Node :: Map (& [(\"b\" , :: cfgy :: __private :: Node :: Seq (& [:: cfgy :: \
+             __private :: Node :: Int (1i128) , :: cfgy :: __private :: Node :: Map (& [(\"x\" , :: cfgy :: __private \
+             :: Node :: Null)])])) , (\"a\" , :: cfgy :: __private :: Node :: Seq (& [])) , (\"c\" , :: cfgy :: \
+             __private :: Node :: Map (& []))])"
+        );
+        // Parses as an expression.
+        syn::parse2::<syn::Expr>(document(&value)).unwrap();
     }
 }
