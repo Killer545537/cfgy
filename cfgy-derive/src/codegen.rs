@@ -18,6 +18,9 @@ pub fn expand(plan: &StructPlan) -> TokenStream2 {
             _ => tuple_body(types),
         },
         StructKind::Unit => unit_body(),
+        StructKind::Enum { .. } => {
+            return quote! { ::core::compile_error!("`FromConfig` cannot convert enums yet"); };
+        }
     };
     let shape = shape(plan);
     let load = plan.source.as_ref().map(|source| load_impl(plan, source));
@@ -58,6 +61,7 @@ fn shape(plan: &StructPlan) -> TokenStream2 {
             }
         }
         StructKind::Unit => quote! { &::cfgy::Shape::Null },
+        StructKind::Enum { .. } => quote! { &::cfgy::Shape::Any },
     }
 }
 
