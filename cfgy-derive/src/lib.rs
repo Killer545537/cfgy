@@ -3,6 +3,7 @@
 //! This crate is an implementation detail of [cfgy](https://docs.rs/cfgy).
 //! Depend on that instead.
 
+mod case;
 mod check;
 mod codegen;
 mod plan;

@@ -1,5 +1,6 @@
 //! Front end of the derive: turns a [`DeriveInput`] into a [`StructPlan`].
 
+use crate::case::RenameRule;
 use proc_macro2::Span;
 use syn::ext::IdentExt;
 use syn::meta::ParseNestedMeta;
@@ -67,10 +68,17 @@ pub fn build(input: &DeriveInput) -> syn::Result<StructPlan> {
     }
 
     let mut errors = Vec::new();
-    let source = source_plan(parse_options(&input.attrs, Site::Struct, &mut errors), &mut errors);
+    let mut options = parse_options(&input.attrs, Site::Struct, &mut errors);
+    let rename_all = options.rename_all.take().and_then(|rule| {
+        if !matches!(fields, Fields::Named(_)) {
+            errors.push(Error::new(rule.span(), "`rename_all` requires a struct with named fields"));
+        }
+        RenameRule::from_name(&rule.value()).map_err(|message| errors.push(Error::new(rule.span(), message))).ok()
+    });
+    let source = source_plan(options, &mut errors);
 
     let kind = match fields {
-        Fields::Named(fields) => StructKind::Named(named_fields(&fields.named, &mut errors)),
+        Fields::Named(fields) => StructKind::Named(named_fields(&fields.named, rename_all, &mut errors)),
         Fields::Unnamed(fields) => StructKind::Tuple(tuple_fields(&fields.unnamed, &mut errors)),
         Fields::Unit => StructKind::Unit,
     };
@@ -88,15 +96,29 @@ pub fn build(input: &DeriveInput) -> syn::Result<StructPlan> {
     Ok(StructPlan { ident: input.ident.clone(), generics: input.generics.clone(), source, kind })
 }
 
-/// Plans each named field, pushing option errors and keys used twice onto `errors`.
-fn named_fields<'a>(fields: impl IntoIterator<Item = &'a syn::Field>, errors: &mut Vec<Error>) -> Vec<FieldPlan> {
+/// Plans each named field, pushing option errors and keys used twice (after renaming) onto `errors`.
+///
+/// A field's key is its `rename` if given, else its name converted by `rename_all`, else its name.
+fn named_fields<'a>(
+    fields: impl IntoIterator<Item = &'a syn::Field>,
+    rename_all: Option<RenameRule>,
+    errors: &mut Vec<Error>,
+) -> Vec<FieldPlan> {
     let mut plans: Vec<FieldPlan> = Vec::new();
     for field in fields {
         let Some(ident) = field.ident.clone() else { continue };
         let options = parse_options(&field.attrs, Site::Field, errors);
-        let (key, key_span) = options
-            .rename
-            .map_or_else(|| (ident.unraw().to_string(), ident.span()), |rename| (rename.value(), rename.span()));
+        let (key, key_span) = options.rename.map_or_else(
+            || {
+                let name = ident.unraw().to_string();
+                let key = match rename_all {
+                    Some(rule) => rule.apply_to_field(&name),
+                    None => name,
+                };
+                (key, ident.span())
+            },
+            |rename| (rename.value(), rename.span()),
+        );
         if let Some(first) = plans.iter().find(|plan| plan.key == key) {
             let mut error = Error::new(key_span, format!("duplicate config key `{key}`"));
             error.combine(Error::new(first.key_span, "first used here"));
@@ -134,6 +156,7 @@ struct Options {
     path: Option<LitStr>,
     format: Option<(Ident, LitStr)>,
     check: Option<(Ident, LitBool)>,
+    rename_all: Option<LitStr>,
     rename: Option<LitStr>,
     default: Option<FieldDefault>,
 }
@@ -160,6 +183,7 @@ fn parse_option(options: &mut Options, meta: &ParseNestedMeta, site: Site, error
         "path" => (Site::Struct, options.path.replace(meta.value()?.parse()?).is_some()),
         "format" => (Site::Struct, options.format.replace((key.clone(), meta.value()?.parse()?)).is_some()),
         "check" => (Site::Struct, options.check.replace((key.clone(), meta.value()?.parse()?)).is_some()),
+        "rename_all" => (Site::Struct, options.rename_all.replace(meta.value()?.parse()?).is_some()),
         "rename" => (Site::Field, options.rename.replace(meta.value()?.parse()?).is_some()),
         "default" => {
             // Bare `default` means `Default::default()`, as with serde.
@@ -458,6 +482,52 @@ mod tests {
         })
         .unwrap();
         assert_eq!(field(&plan, "port").key, "listen-port");
+    }
+
+    #[test]
+    fn rename_all_converts_keys_and_rename_wins() {
+        let plan = build(&parse_quote! {
+            #[config(rename_all = "kebab-case")]
+            struct S {
+                listen_port: u16,
+                r#type: String,
+                #[config(rename = "MAX")]
+                max_conns: u32,
+            }
+        })
+        .unwrap();
+        let keys: Vec<_> = named(&plan).iter().map(|f| f.key.as_str()).collect();
+        assert_eq!(keys, ["listen-port", "type", "MAX"]);
+
+        let plan = build(&parse_quote! { #[config(rename_all = "camelCase")] struct S { listen_port: u16 } }).unwrap();
+        assert_eq!(named(&plan)[0].key, "listenPort");
+    }
+
+    #[test]
+    fn rejects_unknown_rename_all_rule() {
+        let msg = error(&parse_quote! { #[config(rename_all = "Title Case")] struct S { a: u8 } });
+        assert!(msg.starts_with("unknown `rename_all` rule \"Title Case\", expected one of \"lowercase\""), "{msg}");
+    }
+
+    #[test]
+    fn rejects_rename_all_in_the_wrong_place() {
+        let msg = error(&parse_quote! { struct S { #[config(rename_all = "camelCase")] a: u8 } });
+        assert_eq!(msg, "`rename_all` is a struct-level option and cannot be used on a field");
+        let msg = error(&parse_quote! { #[config(rename_all = "camelCase")] struct S(u8, u8); });
+        assert_eq!(msg, "`rename_all` requires a struct with named fields");
+    }
+
+    #[test]
+    fn detects_duplicate_keys_after_rename_all() {
+        let errors = messages(&parse_quote! {
+            #[config(rename_all = "UPPERCASE")]
+            struct S {
+                port: u16,
+                #[config(rename = "PORT")]
+                other: u16,
+            }
+        });
+        assert_eq!(errors, ["duplicate config key `PORT`", "first used here"]);
     }
 
     #[test]

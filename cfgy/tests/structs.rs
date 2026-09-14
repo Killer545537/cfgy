@@ -79,6 +79,24 @@ fn null_into_a_required_field_is_a_type_error() {
 }
 
 #[derive(FromConfig, Debug, PartialEq)]
+#[config(rename_all = "SCREAMING-KEBAB-CASE")]
+struct Renamed {
+    listen_port: u16,
+    #[config(rename = "host")]
+    host_name: String,
+}
+
+#[test]
+fn rename_all_converts_keys_and_rename_wins() {
+    let value = table(&[("LISTEN-PORT", Value::Int(80)), ("host", Value::Str("a".to_owned()))]);
+    assert_eq!(load::<Renamed>(&value).unwrap(), Renamed { listen_port: 80, host_name: "a".to_owned() });
+
+    let value = table(&[("listen_port", Value::Int(80)), ("host", Value::Str("a".to_owned()))]);
+    let err = load::<Renamed>(&value).unwrap_err();
+    assert!(matches!(err, ConfigError::Missing { ref path, .. } if path == "LISTEN-PORT"), "{err:?}");
+}
+
+#[derive(FromConfig, Debug, PartialEq)]
 struct Port(u16);
 
 #[derive(FromConfig, Debug, PartialEq)]
