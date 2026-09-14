@@ -6,7 +6,7 @@ use std::{env, fs, io};
 use cfgy_core::{ConfigError, Datetime, FromValue, PathStack, Value};
 use syn::{GenericArgument, LitStr, PathArguments, PathSegment, Type};
 
-use crate::plan::{FieldPlan, SourcePlan, StructPlan};
+use crate::plan::{FieldPlan, SourcePlan, StructKind, StructPlan};
 
 /// Reads, parses, and type-checks the config file of `plan`, unless it has no `path` or sets `check = false`.
 ///
@@ -15,9 +15,11 @@ pub fn check(plan: &StructPlan) -> syn::Result<Option<PathBuf>> {
     let Some(source) = plan.source.as_ref().filter(|source| source.check) else {
         return Ok(None);
     };
+    // The plan rejects `path` on any other kind of struct.
+    let StructKind::Named(fields) = &plan.kind else { return Ok(None) };
     let manifest_dir = env::var_os("CARGO_MANIFEST_DIR")
         .ok_or_else(|| syn::Error::new(source.path.span(), "`CARGO_MANIFEST_DIR` is not set"))?;
-    check_source(Path::new(&manifest_dir), source, &plan.fields).map(Some)
+    check_source(Path::new(&manifest_dir), source, fields).map(Some)
 }
 
 /// Checks the file `source` points at, relative to `manifest_dir`, with every error spanned on its `path` literal.
@@ -58,11 +60,14 @@ pub fn check_fields(fields: &[FieldPlan], root: &Value) -> Vec<String> {
     };
     let mut errors = Vec::new();
     for field in fields {
+        let optional = option_inner(&field.ty);
+        let required = optional.is_none() && field.default.is_none();
         path.with_key(&field.key, |path| match map.get(&field.key) {
-            None if field.required() => errors.push(ConfigError::missing(path).to_string()),
-            Some(Value::Null) if field.optional.is_some() => {}
+            None if required => errors.push(ConfigError::missing(path).to_string()),
+            Some(Value::Null) if optional.is_some() => {}
+            Some(_) if field.unchecked => {}
             None => {}
-            Some(value) => check_type(field.optional.as_ref().unwrap_or(&field.ty), value, path, &mut errors),
+            Some(value) => check_type(optional.unwrap_or(&field.ty), value, path, &mut errors),
         });
     }
     errors
@@ -160,6 +165,30 @@ fn check_type(ty: &Type, value: &Value, path: &mut PathStack, errors: &mut Vec<S
     }
 }
 
+/// Returns `T` if `ty` is syntactically `Option<T>`, `std::option::Option<T>` or `core::option::Option<T>`.
+///
+/// ponytail: syntactic, so `type MaybePort = Option<u16>` counts as required here even though it loads fine; goes
+/// away when this check is rebuilt on `FromValue::SHAPE`.
+fn option_inner(ty: &Type) -> Option<&Type> {
+    let path = match ty {
+        Type::Group(group) => return option_inner(&group.elem),
+        Type::Path(type_path) if type_path.qself.is_none() => &type_path.path,
+        _ => return None,
+    };
+    let idents: Vec<String> = path.segments.iter().map(|segment| segment.ident.to_string()).collect();
+    let idents: Vec<&str> = idents.iter().map(String::as_str).collect();
+    let prefix_is_bare = path.segments.iter().rev().skip(1).all(|segment| segment.arguments.is_none());
+    if !prefix_is_bare || !matches!(idents.as_slice(), ["Option"] | ["std" | "core", "option", "Option"]) {
+        return None;
+    }
+    let PathArguments::AngleBracketed(generics) = &path.segments.last()?.arguments else { return None };
+    let mut args = generics.args.iter();
+    match (args.next(), args.next()) {
+        (Some(GenericArgument::Type(inner)), None) => Some(inner),
+        _ => None,
+    }
+}
+
 /// Converts `value` with the runtime impl for `T`, keeping only the error.
 fn leaf<T: FromValue>(value: &Value, path: &mut PathStack) -> Result<(), ConfigError> {
     T::from_value(value, path).map(drop)
@@ -191,8 +220,15 @@ mod tests {
         Value::Map(entries.iter().map(|(k, v)| ((*k).to_owned(), v.clone())).collect::<IndexMap<_, _>>())
     }
 
+    fn named(plan: StructPlan) -> Vec<FieldPlan> {
+        match plan.kind {
+            StructKind::Named(fields) => fields,
+            _ => panic!("expected a struct with named fields"),
+        }
+    }
+
     fn errors(input: &DeriveInput, root: &Value) -> Vec<String> {
-        check_fields(&plan::build(input).unwrap().fields, root)
+        check_fields(&named(plan::build(input).unwrap()), root)
     }
 
     fn one_error(input: &DeriveInput, root: &Value) -> String {
@@ -214,7 +250,7 @@ mod tests {
     }
 
     fn check_file(name: &str, contents: &str, input: &DeriveInput) -> Vec<String> {
-        let fields = plan::build(input).unwrap().fields;
+        let fields = named(plan::build(input).unwrap());
         match check_source(&manifest_dir(name, contents), &source(name), &fields) {
             Ok(_) => Vec::new(),
             Err(err) => err.into_iter().map(|err| err.to_string()).collect(),
@@ -319,6 +355,27 @@ mod tests {
     }
 
     #[test]
+    fn unchecked_field_value_is_not_checked_but_still_required() {
+        let input = parse_quote! { struct S { #[config(unchecked)] port: u16 } };
+        assert_eq!(errors(&input, &map(&[("port", Value::Str("x".into()))])), NONE);
+        assert_eq!(one_error(&input, &map(&[])), "missing required key `port`");
+    }
+
+    #[test]
+    fn peels_option() {
+        let peeled = |ty: Type| option_inner(&ty).cloned();
+        let u8_ty: Type = parse_quote!(u8);
+        let vec_ty: Type = parse_quote!(Vec<u8>);
+        assert_eq!(peeled(parse_quote!(Option<u8>)), Some(u8_ty.clone()));
+        assert_eq!(peeled(parse_quote!(std::option::Option<u8>)), Some(u8_ty.clone()));
+        assert_eq!(peeled(parse_quote!(::core::option::Option<u8>)), Some(u8_ty));
+        assert_eq!(peeled(parse_quote!(Option<Vec<u8>>)), Some(vec_ty));
+        assert_eq!(peeled(parse_quote!(Vec<Option<u8>>)), None);
+        assert_eq!(peeled(parse_quote!(u8)), None);
+        assert_eq!(peeled(parse_quote!(foo::Option<u8>)), None);
+    }
+
+    #[test]
     fn missing_file_fails() {
         let dir = manifest_dir("other.txt", "");
         let err = check_source(&dir, &source("missing.toml"), &[]).unwrap_err().to_string();
@@ -357,7 +414,7 @@ mod tests {
         let errors = check_file("ok.toml", "host = \"localhost\"\nport = 8080\n[database]\nurl = 1\n", &input);
         assert_eq!(errors, NONE);
         let dir = manifest_dir("ok.toml", "host = \"a\"\nport = 1\n[database]\n");
-        let fields = plan::build(&input).unwrap().fields;
+        let fields = named(plan::build(&input).unwrap());
         assert_eq!(check_source(&dir, &source("ok.toml"), &fields).unwrap(), dir.join("ok.toml"));
     }
 
@@ -376,7 +433,7 @@ mod tests {
     fn explicit_format_overrides_extension() {
         let mut source = source("config.txt");
         source.format = Some(LitStr::new("json", proc_macro2::Span::call_site()));
-        let fields = plan::build(&parse_quote! { struct S { port: u16 } }).unwrap().fields;
+        let fields = named(plan::build(&parse_quote! { struct S { port: u16 } }).unwrap());
         let dir = manifest_dir("config.txt", r#"{"port": true}"#);
         let err = check_source(&dir, &source, &fields).unwrap_err().to_string();
         assert!(err.ends_with("`port`: expected u16, found bool"), "{err}");

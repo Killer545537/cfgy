@@ -117,7 +117,8 @@
 //! replicas = [{ host = "10.0.0.2", port = 8081 }, { host = "10.0.0.3", port = "eighty" }]
 //! "#;
 //! let err = Settings::load_str(source, &cfgy::Toml).err().unwrap();
-//! assert_eq!(err.to_string(), "`replicas[1].port`: expected u16, found string");
+//! // Line 3, column 77 of `source`: where `"eighty"` starts.
+//! assert_eq!(err.to_string(), "3:77: `replicas[1].port`: expected u16, found string");
 //! ```
 //!
 //! # Formats
@@ -209,8 +210,8 @@
 //!   rejected by the check even though it would load; use `check = false` for such structs.
 //! - **`Option` is recognised by syntax.** A field must be written `Option<T>` (or `std::option::Option<T>`) to be
 //!   optional. `type MaybePort = Option<u16>;` makes the key required.
-//! - **`default` is a plain expression.** `#[config(default = "localhost")]` on a `String` field does not compile
-//!   because the literal is a `&str`; write `default = "localhost".into()`.
+//! - **`default` converts through `DefaultFrom`.** `#[config(default = "localhost")]` works on a `String` field, but an
+//!   expression whose type must itself be inferred, such as `"localhost".into()`, is ambiguous; drop the `.into()`.
 //! - **The check reflects the build machine only.** A file that passes the check can still fail to load in another
 //!   environment, and `check = false` structs are only validated at runtime.
 //! - **Structs only.** Enums, unions, tuple structs, unit structs, and generic structs cannot derive `FromConfig`.
@@ -223,7 +224,7 @@
 //! #[derive(FromConfig)]
 //! #[config(path = "config.toml", check = false)]
 //! struct Settings {
-//!     #[config(default = "localhost".into())]
+//!     #[config(default = "localhost")]
 //!     host: String,
 //! }
 //!
@@ -245,5 +246,6 @@ pub use cfgy_formats::Yaml;
 /// Items used by generated code. Not public API.
 #[doc(hidden)]
 pub mod __private {
+    pub use cfgy_core::DefaultFrom;
     pub use cfgy_formats::select;
 }

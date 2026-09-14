@@ -4,6 +4,7 @@
 
 #[doc(hidden)]
 pub mod check;
+mod default_from;
 mod error;
 mod format;
 mod from_value;
@@ -11,6 +12,8 @@ mod path;
 mod shape;
 mod value;
 
+#[doc(hidden)]
+pub use default_from::DefaultFrom;
 pub use error::{ConfigError, Location};
 pub use format::{Format, ParseError, Parsed, Spans, line_col};
 pub use from_value::FromValue;

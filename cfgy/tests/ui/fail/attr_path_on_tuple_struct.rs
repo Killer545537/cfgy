@@ -1,6 +1,7 @@
 use cfgy::FromConfig;
 
 #[derive(FromConfig)]
-struct Empty;
+#[config(path = "config.toml")]
+struct Port(u16);
 
 fn main() {}

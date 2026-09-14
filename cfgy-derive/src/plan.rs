@@ -1,12 +1,10 @@
 //! Front end of the derive: turns a [`DeriveInput`] into a [`StructPlan`].
 
+use crate::case::RenameRule;
 use proc_macro2::Span;
 use syn::ext::IdentExt;
 use syn::meta::ParseNestedMeta;
-use syn::{
-    Attribute, Data, DeriveInput, Error, Expr, Fields, GenericArgument, Generics, Ident, LitBool, LitStr,
-    PathArguments, Type,
-};
+use syn::{Attribute, Data, DeriveInput, Error, Expr, Fields, Generics, Ident, LitBool, LitStr, Token, Type};
 
 /// Everything codegen needs to know about a derived struct.
 pub struct StructPlan {
@@ -14,7 +12,17 @@ pub struct StructPlan {
     pub generics: Generics,
     /// `Some` if and only if `#[config(path = "...")]` is present.
     pub source: Option<SourcePlan>,
-    pub fields: Vec<FieldPlan>,
+    pub kind: StructKind,
+}
+
+/// The field layout of the derived struct.
+pub enum StructKind {
+    /// `struct S { .. }`: reads a table.
+    Named(Vec<FieldPlan>),
+    /// `struct S(A, B)`: reads a sequence of exactly this many items, except that one field is a transparent newtype.
+    Tuple(Vec<Type>),
+    /// `struct S;`: reads null.
+    Unit,
 }
 
 /// The struct-level `#[config(path, format, check)]` options.
@@ -31,30 +39,24 @@ pub struct FieldPlan {
     pub key: String,
     pub key_span: Span,
     pub ty: Type,
-    /// `Some(inner)` when the field is `Option<inner>`.
-    pub optional: Option<Type>,
-    pub default: Option<Expr>,
+    /// Used for an absent key; without one, the type's `FromValue::from_missing` decides.
+    pub default: Option<FieldDefault>,
+    /// `#[config(unchecked)]`: the field's shape is `Shape::Any`, so the compile-time check accepts any value.
+    pub unchecked: bool,
 }
 
-impl FieldPlan {
-    /// A key absent from the config is an error only for required fields.
-    pub const fn required(&self) -> bool {
-        self.optional.is_none() && self.default.is_none()
-    }
+/// A field's `#[config(default)]` or `#[config(default = <expr>)]`.
+pub enum FieldDefault {
+    /// Bare `default`: `Default::default()`.
+    Trait,
+    /// `default = <expr>`, converted into the field type through `DefaultFrom`.
+    Expr(Expr),
 }
 
 /// Builds the plan for `input`, rejecting shapes the derive does not support.
 pub fn build(input: &DeriveInput) -> syn::Result<StructPlan> {
     let fields = match &input.data {
-        Data::Struct(data) => match &data.fields {
-            Fields::Named(fields) => &fields.named,
-            Fields::Unnamed(fields) => {
-                return Err(Error::new_spanned(fields, "`FromConfig` cannot be derived for tuple structs"));
-            }
-            Fields::Unit => {
-                return Err(Error::new(input.ident.span(), "`FromConfig` cannot be derived for unit structs"));
-            }
-        },
+        Data::Struct(data) => &data.fields,
         Data::Enum(data) => {
             return Err(Error::new(data.enum_token.span, "`FromConfig` can only be derived for structs, not enums"));
         }
@@ -68,26 +70,22 @@ pub fn build(input: &DeriveInput) -> syn::Result<StructPlan> {
     }
 
     let mut errors = Vec::new();
-    let source = source_plan(parse_options(&input.attrs, Site::Struct, &mut errors), &mut errors);
-
-    let mut plans: Vec<FieldPlan> = Vec::with_capacity(fields.len());
-    for field in fields {
-        let Some(ident) = field.ident.clone() else { continue };
-        let options = parse_options(&field.attrs, Site::Field, &mut errors);
-        let (key, key_span) = options
-            .rename
-            .map_or_else(|| (ident.unraw().to_string(), ident.span()), |rename| (rename.value(), rename.span()));
-        if plans.iter().any(|plan| plan.key == key) {
-            errors.push(Error::new(key_span, format!("duplicate config key `{key}`")));
+    let mut options = parse_options(&input.attrs, Site::Struct, &mut errors);
+    let rename_all = options.rename_all.take().and_then(|rule| {
+        if !matches!(fields, Fields::Named(_)) {
+            errors.push(Error::new(rule.span(), "`rename_all` requires a struct with named fields"));
         }
-        plans.push(FieldPlan {
-            ident,
-            key,
-            key_span,
-            ty: field.ty.clone(),
-            optional: option_inner(&field.ty).cloned(),
-            default: options.default,
-        });
+        RenameRule::from_name(&rule.value()).map_err(|message| errors.push(Error::new(rule.span(), message))).ok()
+    });
+    let source = source_plan(options, &mut errors);
+
+    let kind = match fields {
+        Fields::Named(fields) => StructKind::Named(named_fields(&fields.named, rename_all, &mut errors)),
+        Fields::Unnamed(fields) => StructKind::Tuple(tuple_fields(&fields.unnamed, &mut errors)),
+        Fields::Unit => StructKind::Unit,
+    };
+    if let (Some(source), StructKind::Tuple(_) | StructKind::Unit) = (&source, &kind) {
+        errors.push(Error::new(source.path.span(), "`path` requires a struct with named fields"));
     }
 
     if let Some(error) = errors.into_iter().reduce(|mut acc, error| {
@@ -97,7 +95,59 @@ pub fn build(input: &DeriveInput) -> syn::Result<StructPlan> {
         return Err(error);
     }
 
-    Ok(StructPlan { ident: input.ident.clone(), generics: input.generics.clone(), source, fields: plans })
+    Ok(StructPlan { ident: input.ident.clone(), generics: input.generics.clone(), source, kind })
+}
+
+/// Plans each named field, pushing option errors and keys used twice (after renaming) onto `errors`.
+///
+/// A field's key is its `rename` if given, else its name converted by `rename_all`, else its name.
+fn named_fields<'a>(
+    fields: impl IntoIterator<Item = &'a syn::Field>,
+    rename_all: Option<RenameRule>,
+    errors: &mut Vec<Error>,
+) -> Vec<FieldPlan> {
+    let mut plans: Vec<FieldPlan> = Vec::new();
+    for field in fields {
+        let Some(ident) = field.ident.clone() else { continue };
+        let options = parse_options(&field.attrs, Site::Field, errors);
+        let (key, key_span) = options.rename.map_or_else(
+            || {
+                let name = ident.unraw().to_string();
+                let key = match rename_all {
+                    Some(rule) => rule.apply_to_field(&name),
+                    None => name,
+                };
+                (key, ident.span())
+            },
+            |rename| (rename.value(), rename.span()),
+        );
+        if let Some(first) = plans.iter().find(|plan| plan.key == key) {
+            let mut error = Error::new(key_span, format!("duplicate config key `{key}`"));
+            error.combine(Error::new(first.key_span, "first used here"));
+            errors.push(error);
+        }
+        plans.push(FieldPlan {
+            ident,
+            key,
+            key_span,
+            ty: field.ty.clone(),
+            default: options.default,
+            unchecked: options.unchecked.is_some(),
+        });
+    }
+    plans
+}
+
+/// The types of a tuple struct's fields; `config` attributes on them are pushed onto `errors`.
+fn tuple_fields<'a>(fields: impl IntoIterator<Item = &'a syn::Field>, errors: &mut Vec<Error>) -> Vec<Type> {
+    let mut types = Vec::new();
+    for field in fields {
+        for attr in field.attrs.iter().filter(|attr| attr.path().is_ident("config")) {
+            errors.push(Error::new_spanned(attr, "`config` attributes are not supported on tuple struct fields"));
+        }
+        types.push(field.ty.clone());
+    }
+    types
 }
 
 /// Where a `#[config(...)]` attribute is written.
@@ -115,8 +165,10 @@ struct Options {
     path: Option<LitStr>,
     format: Option<(Ident, LitStr)>,
     check: Option<(Ident, LitBool)>,
+    rename_all: Option<LitStr>,
     rename: Option<LitStr>,
-    default: Option<Expr>,
+    default: Option<FieldDefault>,
+    unchecked: Option<Ident>,
 }
 
 /// Parses every `#[config(...)]` in `attrs`, pushing errors instead of stopping at the first.
@@ -130,19 +182,33 @@ fn parse_options(attrs: &[Attribute], site: Site, errors: &mut Vec<Error>) -> Op
     options
 }
 
-/// Parses one `key = value` option. Misplaced and duplicate options are pushed to `errors`
-/// so parsing continues; unknown options and malformed values abort the attribute.
+/// Parses one `key = value` option. Unknown, misplaced, and duplicate options are pushed to `errors` so parsing
+/// continues; only a malformed value aborts the attribute.
 fn parse_option(options: &mut Options, meta: &ParseNestedMeta, site: Site, errors: &mut Vec<Error>) -> syn::Result<()> {
     let Some(key) = meta.path.get_ident().cloned() else {
-        return Err(meta.error("unknown `config` option"));
+        errors.push(meta.error("unknown `config` option"));
+        return skip_value(meta);
     };
     let (expected, duplicate) = match key.to_string().as_str() {
         "path" => (Site::Struct, options.path.replace(meta.value()?.parse()?).is_some()),
         "format" => (Site::Struct, options.format.replace((key.clone(), meta.value()?.parse()?)).is_some()),
         "check" => (Site::Struct, options.check.replace((key.clone(), meta.value()?.parse()?)).is_some()),
+        "rename_all" => (Site::Struct, options.rename_all.replace(meta.value()?.parse()?).is_some()),
         "rename" => (Site::Field, options.rename.replace(meta.value()?.parse()?).is_some()),
-        "default" => (Site::Field, options.default.replace(meta.value()?.parse()?).is_some()),
-        _ => return Err(meta.error(format!("unknown `config` option `{key}`"))),
+        "default" => {
+            // Bare `default` means `Default::default()`, as with serde.
+            let default = if meta.input.is_empty() || meta.input.peek(Token![,]) {
+                FieldDefault::Trait
+            } else {
+                FieldDefault::Expr(meta.value()?.parse()?)
+            };
+            (Site::Field, options.default.replace(default).is_some())
+        }
+        "unchecked" => (Site::Field, options.unchecked.replace(key.clone()).is_some()),
+        _ => {
+            errors.push(meta.error(format!("unknown `config` option `{key}`")));
+            return skip_value(meta);
+        }
     };
     match (site, expected) {
         (Site::Field, Site::Struct) => {
@@ -161,6 +227,16 @@ fn parse_option(options: &mut Options, meta: &ParseNestedMeta, site: Site, error
     }
     if duplicate {
         errors.push(Error::new(key.span(), format!("duplicate `{key}` option")));
+    }
+    Ok(())
+}
+
+/// Consumes the `= <expr>` or `(...)` after an unknown option, so the options after it are still parsed.
+fn skip_value(meta: &ParseNestedMeta) -> syn::Result<()> {
+    if meta.input.peek(Token![=]) {
+        meta.value()?.parse::<Expr>()?;
+    } else if meta.input.peek(syn::token::Paren) {
+        meta.input.parse::<proc_macro2::TokenTree>()?;
     }
     Ok(())
 }
@@ -186,27 +262,6 @@ fn source_plan(options: Options, errors: &mut Vec<Error>) -> Option<SourcePlan> 
     })
 }
 
-/// Returns `T` if `ty` is syntactically `Option<T>`, `std::option::Option<T>` or `core::option::Option<T>`.
-fn option_inner(ty: &Type) -> Option<&Type> {
-    let path = match ty {
-        Type::Group(group) => return option_inner(&group.elem),
-        Type::Path(type_path) if type_path.qself.is_none() => &type_path.path,
-        _ => return None,
-    };
-    let idents: Vec<String> = path.segments.iter().map(|segment| segment.ident.to_string()).collect();
-    let idents: Vec<&str> = idents.iter().map(String::as_str).collect();
-    let prefix_is_bare = path.segments.iter().rev().skip(1).all(|segment| segment.arguments.is_none());
-    if !prefix_is_bare || !matches!(idents.as_slice(), ["Option"] | ["std" | "core", "option", "Option"]) {
-        return None;
-    }
-    let PathArguments::AngleBracketed(generics) = &path.segments.last()?.arguments else { return None };
-    let mut args = generics.args.iter();
-    match (args.next(), args.next()) {
-        (Some(GenericArgument::Type(inner)), None) => Some(inner),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,6 +269,13 @@ mod tests {
 
     fn error(input: &DeriveInput) -> String {
         build(input).err().expect("expected an error").to_string()
+    }
+
+    fn named(plan: &StructPlan) -> &[FieldPlan] {
+        match &plan.kind {
+            StructKind::Named(fields) => fields,
+            _ => panic!("expected a struct with named fields"),
+        }
     }
 
     #[test]
@@ -224,7 +286,7 @@ mod tests {
         .unwrap();
         assert_eq!(plan.ident, "Settings");
         assert!(plan.source.is_none());
-        let keys: Vec<_> = plan.fields.iter().map(|f| f.key.as_str()).collect();
+        let keys: Vec<_> = named(&plan).iter().map(|f| f.key.as_str()).collect();
         assert_eq!(keys, ["port", "host"]);
     }
 
@@ -239,13 +301,27 @@ mod tests {
     }
 
     #[test]
-    fn rejects_tuple_struct() {
-        assert!(error(&parse_quote! { struct T(u8); }).contains("tuple structs"));
+    fn tuple_and_unit_structs_build() {
+        let plan = build(&parse_quote! { struct Port(u16); }).unwrap();
+        let u16_ty: Type = parse_quote!(u16);
+        assert!(matches!(&plan.kind, StructKind::Tuple(types) if *types == [u16_ty]));
+        let plan = build(&parse_quote! { struct Pair(String, u8); }).unwrap();
+        assert!(matches!(&plan.kind, StructKind::Tuple(types) if types.len() == 2));
+        let plan = build(&parse_quote! { struct Marker; }).unwrap();
+        assert!(matches!(plan.kind, StructKind::Unit));
     }
 
     #[test]
-    fn rejects_unit_struct() {
-        assert!(error(&parse_quote! { struct U; }).contains("unit structs"));
+    fn rejects_path_without_named_fields() {
+        let msg = "`path` requires a struct with named fields";
+        assert_eq!(error(&parse_quote! { #[config(path = "a.toml")] struct Port(u16); }), msg);
+        assert_eq!(error(&parse_quote! { #[config(path = "a.toml", check = false)] struct Marker; }), msg);
+    }
+
+    #[test]
+    fn rejects_config_attributes_on_tuple_fields() {
+        let errors = messages(&parse_quote! { struct Pair(#[config(default)] u8, #[config(rename = "b")] u8); });
+        assert_eq!(errors, ["`config` attributes are not supported on tuple struct fields"; 2]);
     }
 
     fn messages(input: &DeriveInput) -> Vec<String> {
@@ -290,7 +366,29 @@ mod tests {
         })
         .unwrap();
         let expected: Expr = parse_quote!(8080 + 1);
-        assert_eq!(plan.fields[0].default, Some(expected));
+        assert!(matches!(&named(&plan)[0].default, Some(FieldDefault::Expr(expr)) if *expr == expected));
+    }
+
+    #[test]
+    fn bare_default_is_the_default_trait() {
+        let plan = build(&parse_quote! {
+            struct Settings {
+                #[config(default)]
+                tags: Vec<String>,
+                #[config(default, rename = "n")]
+                count: u8,
+            }
+        })
+        .unwrap();
+        assert!(matches!(named(&plan)[0].default, Some(FieldDefault::Trait)));
+        assert!(matches!(named(&plan)[1].default, Some(FieldDefault::Trait)));
+        assert_eq!(named(&plan)[1].key, "n");
+    }
+
+    #[test]
+    fn rejects_duplicate_bare_default() {
+        let msg = error(&parse_quote! { struct S { #[config(default, default = 1)] a: u8 } });
+        assert_eq!(msg, "duplicate `default` option");
     }
 
     #[test]
@@ -299,6 +397,28 @@ mod tests {
             error(&parse_quote! { #[config(nope = 1)] struct S { a: u8 } }).contains("unknown `config` option `nope`")
         );
         assert!(error(&parse_quote! { struct S { #[config(nope)] a: u8 } }).contains("unknown `config` option `nope`"));
+    }
+
+    #[test]
+    fn keeps_parsing_after_an_unknown_option() {
+        let errors = messages(&parse_quote! {
+            #[config(bogus = 1 + 2, nested(a, b = 3), a::b, path = "a.toml", rename = "x")]
+            struct S {
+                #[config(nope, path = "b.toml")]
+                a: u8,
+            }
+        });
+        assert_eq!(
+            errors,
+            [
+                "unknown `config` option `bogus`",
+                "unknown `config` option `nested`",
+                "unknown `config` option",
+                "`rename` is a field-level option and cannot be used on the struct",
+                "unknown `config` option `nope`",
+                "`path` is a struct-level option and cannot be used on a field",
+            ]
+        );
     }
 
     #[test]
@@ -360,7 +480,7 @@ mod tests {
     }
 
     fn field<'a>(plan: &'a StructPlan, name: &str) -> &'a FieldPlan {
-        plan.fields.iter().find(|f| f.ident == name).unwrap()
+        named(plan).iter().find(|f| f.ident == name).unwrap()
     }
 
     #[test]
@@ -376,64 +496,80 @@ mod tests {
     }
 
     #[test]
+    fn rename_all_converts_keys_and_rename_wins() {
+        let plan = build(&parse_quote! {
+            #[config(rename_all = "kebab-case")]
+            struct S {
+                listen_port: u16,
+                r#type: String,
+                #[config(rename = "MAX")]
+                max_conns: u32,
+            }
+        })
+        .unwrap();
+        let keys: Vec<_> = named(&plan).iter().map(|f| f.key.as_str()).collect();
+        assert_eq!(keys, ["listen-port", "type", "MAX"]);
+
+        let plan = build(&parse_quote! { #[config(rename_all = "camelCase")] struct S { listen_port: u16 } }).unwrap();
+        assert_eq!(named(&plan)[0].key, "listenPort");
+    }
+
+    #[test]
+    fn rejects_unknown_rename_all_rule() {
+        let msg = error(&parse_quote! { #[config(rename_all = "Title Case")] struct S { a: u8 } });
+        assert!(msg.starts_with("unknown `rename_all` rule \"Title Case\", expected one of \"lowercase\""), "{msg}");
+    }
+
+    #[test]
+    fn rejects_rename_all_in_the_wrong_place() {
+        let msg = error(&parse_quote! { struct S { #[config(rename_all = "camelCase")] a: u8 } });
+        assert_eq!(msg, "`rename_all` is a struct-level option and cannot be used on a field");
+        let msg = error(&parse_quote! { #[config(rename_all = "camelCase")] struct S(u8, u8); });
+        assert_eq!(msg, "`rename_all` requires a struct with named fields");
+    }
+
+    #[test]
+    fn detects_duplicate_keys_after_rename_all() {
+        let errors = messages(&parse_quote! {
+            #[config(rename_all = "UPPERCASE")]
+            struct S {
+                port: u16,
+                #[config(rename = "PORT")]
+                other: u16,
+            }
+        });
+        assert_eq!(errors, ["duplicate config key `PORT`", "first used here"]);
+    }
+
+    #[test]
+    fn unchecked_is_a_field_flag() {
+        let plan = build(&parse_quote! { struct S { #[config(unchecked)] a: u8, b: u8 } }).unwrap();
+        assert!(named(&plan)[0].unchecked);
+        assert!(!named(&plan)[1].unchecked);
+        let msg = error(&parse_quote! { #[config(unchecked)] struct S { a: u8 } });
+        assert_eq!(msg, "`unchecked` is a field-level option and cannot be used on the struct");
+        let msg = error(&parse_quote! { struct S(#[config(unchecked)] u8); });
+        assert_eq!(msg, "`config` attributes are not supported on tuple struct fields");
+    }
+
+    #[test]
     fn raw_ident_key_is_unraw() {
         let plan = build(&parse_quote! { struct S { r#type: String } }).unwrap();
-        let ty = &plan.fields[0];
+        let ty = &named(&plan)[0];
         assert_eq!(ty.ident, "r#type");
         assert_eq!(ty.key, "type");
     }
 
     #[test]
-    fn rejects_duplicate_key_after_rename() {
-        let msg = error(&parse_quote! {
+    fn rejects_duplicate_key_after_rename_pointing_at_the_first_use() {
+        let errors = messages(&parse_quote! {
             struct S {
                 port: u16,
                 #[config(rename = "port")]
                 other: u16,
             }
         });
-        assert_eq!(msg, "duplicate config key `port`");
-    }
-
-    #[test]
-    fn peels_option() {
-        let plan = build(&parse_quote! {
-            struct S {
-                a: Option<u8>,
-                b: std::option::Option<u8>,
-                c: ::core::option::Option<u8>,
-                d: Option<Vec<u8>>,
-                e: Vec<Option<u8>>,
-                f: u8,
-                g: foo::Option<u8>,
-            }
-        })
-        .unwrap();
-        let u8_ty: Type = parse_quote!(u8);
-        let vec_ty: Type = parse_quote!(Vec<u8>);
-        assert_eq!(field(&plan, "a").optional.as_ref(), Some(&u8_ty));
-        assert_eq!(field(&plan, "b").optional.as_ref(), Some(&u8_ty));
-        assert_eq!(field(&plan, "c").optional.as_ref(), Some(&u8_ty));
-        assert_eq!(field(&plan, "d").optional.as_ref(), Some(&vec_ty));
-        assert!(field(&plan, "e").optional.is_none());
-        assert!(field(&plan, "f").optional.is_none());
-        assert!(field(&plan, "g").optional.is_none());
-    }
-
-    #[test]
-    fn required_only_without_option_or_default() {
-        let plan = build(&parse_quote! {
-            struct S {
-                a: u8,
-                b: Option<u8>,
-                #[config(default = 1)]
-                c: u8,
-            }
-        })
-        .unwrap();
-        assert!(field(&plan, "a").required());
-        assert!(!field(&plan, "b").required());
-        assert!(!field(&plan, "c").required());
+        assert_eq!(errors, ["duplicate config key `port`", "first used here"]);
     }
 
     #[test]
