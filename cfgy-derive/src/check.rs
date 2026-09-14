@@ -4,14 +4,17 @@ use std::path::{Path, PathBuf};
 use std::{env, fs, io};
 
 use cfgy_core::{ConfigError, Datetime, FromValue, PathStack, Value};
+use proc_macro2::{Literal, TokenStream as TokenStream2};
+use quote::{ToTokens, quote};
 use syn::{GenericArgument, LitStr, PathArguments, PathSegment, Type};
 
 use crate::plan::{FieldPlan, SourcePlan, StructKind, StructPlan};
 
 /// Reads, parses, and type-checks the config file of `plan`, unless it has no `path` or sets `check = false`.
 ///
-/// Returns the resolved path of the checked file, so the caller can register it as a build dependency.
-pub fn check(plan: &StructPlan) -> syn::Result<Option<PathBuf>> {
+/// Returns the resolved path of the checked file, so the caller can register it as a build dependency, and the file
+/// lowered into a const document.
+pub fn check(plan: &StructPlan) -> syn::Result<Option<(PathBuf, TokenStream2)>> {
     let Some(source) = plan.source.as_ref().filter(|source| source.check) else {
         return Ok(None);
     };
@@ -26,7 +29,11 @@ pub fn check(plan: &StructPlan) -> syn::Result<Option<PathBuf>> {
 ///
 /// Messages name the file as written in the attribute, not the resolved absolute path, so they read the same on
 /// every machine.
-pub fn check_source(manifest_dir: &Path, source: &SourcePlan, fields: &[FieldPlan]) -> syn::Result<PathBuf> {
+pub fn check_source(
+    manifest_dir: &Path,
+    source: &SourcePlan,
+    fields: &[FieldPlan],
+) -> syn::Result<(PathBuf, TokenStream2)> {
     let file = source.path.value();
     let resolved = manifest_dir.join(&file);
     let error = |message: String| syn::Error::new(source.path.span(), message);
@@ -49,7 +56,52 @@ pub fn check_source(manifest_dir: &Path, source: &SourcePlan, fields: &[FieldPla
             all.combine(next);
             all
         })
-        .map_or(Ok(resolved), Err)
+        .map_or_else(|| Ok((resolved, document(&value))), Err)
+}
+
+/// `value` as an expression building a `::cfgy::__private::Node`, for a const initializer.
+///
+/// Nested slices are written as `&[..]` and promoted to `'static` by the const they initialize.
+pub fn document(value: &Value) -> TokenStream2 {
+    match value {
+        Value::Null => quote! { ::cfgy::__private::Node::Null },
+        Value::Bool(b) => quote! { ::cfgy::__private::Node::Bool(#b) },
+        Value::Int(i) => {
+            let i = Literal::i128_suffixed(*i);
+            quote! { ::cfgy::__private::Node::Int(#i) }
+        }
+        Value::Float(f) => {
+            let f = float(*f);
+            quote! { ::cfgy::__private::Node::Float(#f) }
+        }
+        Value::Str(s) => quote! { ::cfgy::__private::Node::Str(#s) },
+        Value::Datetime(Datetime(s)) => quote! { ::cfgy::__private::Node::Datetime(#s) },
+        Value::Seq(items) => {
+            let items = items.iter().map(document);
+            quote! { ::cfgy::__private::Node::Seq(&[#(#items),*]) }
+        }
+        Value::Map(entries) => {
+            let entries = entries.iter().map(|(key, value)| {
+                let value = document(value);
+                quote! { (#key, #value) }
+            });
+            quote! { ::cfgy::__private::Node::Map(&[#(#entries),*]) }
+        }
+    }
+}
+
+/// An `f64` expression for `f`: a suffixed literal, or the named constant for NaN and the infinities, which have no
+/// literal form.
+fn float(f: f64) -> TokenStream2 {
+    if f.is_nan() {
+        quote! { ::core::primitive::f64::NAN }
+    } else if f == f64::INFINITY {
+        quote! { ::core::primitive::f64::INFINITY }
+    } else if f == f64::NEG_INFINITY {
+        quote! { ::core::primitive::f64::NEG_INFINITY }
+    } else {
+        Literal::f64_suffixed(f).into_token_stream()
+    }
 }
 
 /// Checks `root` against `fields`, returning every error message rather than stopping at the first.
@@ -415,7 +467,7 @@ mod tests {
         assert_eq!(errors, NONE);
         let dir = manifest_dir("ok.toml", "host = \"a\"\nport = 1\n[database]\n");
         let fields = named(plan::build(&input).unwrap());
-        assert_eq!(check_source(&dir, &source("ok.toml"), &fields).unwrap(), dir.join("ok.toml"));
+        assert_eq!(check_source(&dir, &source("ok.toml"), &fields).unwrap().0, dir.join("ok.toml"));
     }
 
     #[cfg(feature = "toml")]
@@ -437,5 +489,66 @@ mod tests {
         let dir = manifest_dir("config.txt", r#"{"port": true}"#);
         let err = check_source(&dir, &source, &fields).unwrap_err().to_string();
         assert!(err.ends_with("`port`: expected u16, found bool"), "{err}");
+    }
+
+    fn doc(value: &Value) -> String {
+        document(value).to_string()
+    }
+
+    #[test]
+    fn document_scalars() {
+        assert_eq!(doc(&Value::Null), ":: cfgy :: __private :: Node :: Null");
+        assert_eq!(doc(&Value::Bool(true)), ":: cfgy :: __private :: Node :: Bool (true)");
+        assert_eq!(doc(&Value::Int(8080)), ":: cfgy :: __private :: Node :: Int (8080i128)");
+        assert_eq!(doc(&Value::Int(-3)), ":: cfgy :: __private :: Node :: Int (- 3i128)");
+        assert_eq!(
+            doc(&Value::Int(i128::from(u64::MAX))),
+            ":: cfgy :: __private :: Node :: Int (18446744073709551615i128)"
+        );
+        assert_eq!(doc(&Value::Str("a \"b\"\n".into())), r#":: cfgy :: __private :: Node :: Str ("a \"b\"\n")"#);
+        assert_eq!(
+            doc(&Value::Datetime(Datetime("1979-05-27T07:32:00Z".into()))),
+            r#":: cfgy :: __private :: Node :: Datetime ("1979-05-27T07:32:00Z")"#
+        );
+    }
+
+    #[test]
+    fn document_floats() {
+        assert_eq!(doc(&Value::Float(1.5)), ":: cfgy :: __private :: Node :: Float (1.5f64)");
+        assert_eq!(doc(&Value::Float(-0.25)), ":: cfgy :: __private :: Node :: Float (- 0.25f64)");
+        assert_eq!(doc(&Value::Float(3.0)), ":: cfgy :: __private :: Node :: Float (3f64)");
+        assert_eq!(
+            doc(&Value::Float(f64::NAN)),
+            ":: cfgy :: __private :: Node :: Float (:: core :: primitive :: f64 :: NAN)"
+        );
+        assert_eq!(
+            doc(&Value::Float(f64::INFINITY)),
+            ":: cfgy :: __private :: Node :: Float (:: core :: primitive :: f64 :: INFINITY)"
+        );
+        assert_eq!(
+            doc(&Value::Float(f64::NEG_INFINITY)),
+            ":: cfgy :: __private :: Node :: Float (:: core :: primitive :: f64 :: NEG_INFINITY)"
+        );
+        // Shortest round-trip text, so the const holds exactly the parsed value.
+        let parsed: f64 = Literal::f64_suffixed(0.1 + 0.2).to_string().trim_end_matches("f64").parse().unwrap();
+        assert_eq!(parsed.to_bits(), (0.1_f64 + 0.2).to_bits());
+    }
+
+    #[test]
+    fn document_containers_keep_order() {
+        let value = map(&[
+            ("b", Value::Seq(vec![Value::Int(1), map(&[("x", Value::Null)])])),
+            ("a", Value::Seq(vec![])),
+            ("c", map(&[])),
+        ]);
+        assert_eq!(
+            doc(&value),
+            ":: cfgy :: __private :: Node :: Map (& [(\"b\" , :: cfgy :: __private :: Node :: Seq (& [:: cfgy :: \
+             __private :: Node :: Int (1i128) , :: cfgy :: __private :: Node :: Map (& [(\"x\" , :: cfgy :: __private \
+             :: Node :: Null)])])) , (\"a\" , :: cfgy :: __private :: Node :: Seq (& [])) , (\"c\" , :: cfgy :: \
+             __private :: Node :: Map (& []))])"
+        );
+        // Parses as an expression.
+        syn::parse2::<syn::Expr>(document(&value)).unwrap();
     }
 }

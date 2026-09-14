@@ -29,9 +29,12 @@ fn expand(plan: &plan::StructPlan) -> TokenStream2 {
     match check::check(plan) {
         // Unused, but it makes Cargo rebuild when the config file changes; without it the check validates a
         // stale file.
-        Ok(Some(resolved)) => {
+        Ok(Some((resolved, document))) => {
             let resolved = LitStr::new(&resolved.to_string_lossy(), proc_macro2::Span::call_site());
-            tokens.extend(quote! { const _: &str = ::core::include_str!(#resolved); });
+            tokens.extend(quote! {
+                const _: &str = ::core::include_str!(#resolved);
+                const _: &::cfgy::__private::Node = &#document;
+            });
         }
         Ok(None) => {}
         Err(error) => tokens.extend(error.into_compile_error()),
