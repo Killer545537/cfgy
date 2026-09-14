@@ -161,3 +161,48 @@ fn null_is_none_for_option_and_a_type_error_for_required() {
     let err = Nullable::from_value(&map(Value::Null), &mut PathStack::new()).unwrap_err();
     assert!(matches!(err, ConfigError::Type { ref path, found: "null", .. } if path == "host"), "{err:?}");
 }
+
+/// Writes `contents` to a uniquely named temp file with `extension`, loads it, and removes it again.
+fn load_temp(name: &str, extension: &str, contents: &str) -> std::io::Result<(PathBuf, Result<Settings, ConfigError>)> {
+    let path = std::env::temp_dir().join(format!("cfgy-location-{name}-{}.{extension}", std::process::id()));
+    std::fs::write(&path, contents)?;
+    let loaded = Settings::load_from(&path);
+    std::fs::remove_file(&path)?;
+    Ok((path, loaded))
+}
+
+const LOCATED_TOML: &str =
+    "type = \"web\"\nfeatures = {}\nreplicas = []\n\n[server]\nhost = \"a\"\nport = \"eighty\"\n";
+
+#[test]
+fn load_from_errors_name_the_file_line_and_column_toml() {
+    let (path, loaded) = load_temp("toml", "toml", LOCATED_TOML).unwrap();
+    let err = loaded.unwrap_err().to_string();
+    assert_eq!(err, format!("{}:7:8: `server.port`: expected u16, found string", path.display()));
+}
+
+#[test]
+fn missing_keys_point_at_their_table() {
+    let source = "type = \"web\"\nfeatures = {}\nreplicas = []\n\n[server]\nhost = \"a\"\n";
+    let (path, loaded) = load_temp("missing", "toml", source).unwrap();
+    let err = loaded.unwrap_err().to_string();
+    assert_eq!(err, format!("{}:5:1: missing required key `server.port`", path.display()));
+}
+
+#[cfg(feature = "json")]
+#[test]
+fn load_from_errors_name_the_file_line_and_column_json() {
+    let source = "{\n  \"type\": \"web\",\n  \"features\": {},\n  \"replicas\": [],\n  \"server\": {\"host\": \"a\", \"port\": true}\n}\n";
+    let (path, loaded) = load_temp("json", "json", source).unwrap();
+    let err = loaded.unwrap_err().to_string();
+    assert_eq!(err, format!("{}:5:35: `server.port`: expected u16, found bool", path.display()));
+}
+
+#[cfg(feature = "yaml")]
+#[test]
+fn load_from_errors_name_the_file_line_and_column_yaml() {
+    let source = "type: web\nfeatures: {}\nreplicas: []\nserver:\n  host: a\n  port: [1]\n";
+    let (path, loaded) = load_temp("yaml", "yaml", source).unwrap();
+    let err = loaded.unwrap_err().to_string();
+    assert_eq!(err, format!("{}:6:9: `server.port`: expected u16, found sequence", path.display()));
+}
