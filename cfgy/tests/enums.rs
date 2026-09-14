@@ -426,3 +426,70 @@ fn derived_enums_describe_their_shape() {
     ));
     assert!(matches!(Empty::SHAPE, Shape::Enum { name: "Empty", variants: [], .. }));
 }
+
+// ponytail: `check = false` until the compile-time check handles enums.
+#[derive(FromConfig, Debug, PartialEq)]
+#[config(path = "tests/fixtures/enums.toml", check = false)]
+struct Deployment {
+    mode: External,
+    port: External,
+    pair: External,
+    serve: External,
+    backends: Vec<Internal>,
+    probe: Adjacent,
+    level: Adjacent,
+    fallback: Untagged,
+    names: Vec<Untagged>,
+    speed: Renamed,
+}
+
+#[test]
+fn toml_enums_load() {
+    let deployment = Deployment::load_str(include_str!("fixtures/enums.toml"), &cfgy::Toml).unwrap();
+    assert_eq!(
+        deployment,
+        Deployment {
+            mode: External::Off,
+            port: External::Port(8080),
+            pair: External::Pair("a".to_owned(), 1),
+            serve: External::Serve { host: "example.com".to_owned(), port: 80, tls: Some(true) },
+            backends: vec![
+                Internal::Off,
+                Internal::Serve { host: "10.0.0.1".to_owned(), port: Some(9000) },
+                Internal::Wrapped(Server { host: "10.0.0.2".to_owned(), port: 80 }),
+            ],
+            probe: Adjacent::Serve { host: "probe.local".to_owned() },
+            level: Adjacent::Level(None),
+            fallback: Untagged::Pair("b".to_owned(), 2),
+            names: vec![
+                Untagged::Name("api".to_owned()),
+                Untagged::Port(443),
+                Untagged::Serve { host: "db".to_owned() },
+            ],
+            speed: Renamed::VeryFast,
+        }
+    );
+}
+
+#[cfg(all(feature = "json", feature = "yaml"))]
+#[test]
+fn enums_load_the_same_from_toml_json_and_yaml() {
+    let toml = Deployment::load_str(include_str!("fixtures/enums.toml"), &cfgy::Toml).unwrap();
+    let json = Deployment::load_str(include_str!("fixtures/enums.json"), &cfgy::Json).unwrap();
+    // The YAML fixture writes the externally tagged fields as `!Variant` tags.
+    let yaml = Deployment::load_str(include_str!("fixtures/enums.yaml"), &cfgy::Yaml).unwrap();
+    assert_eq!(toml, json);
+    assert_eq!(toml, yaml);
+}
+
+#[cfg(feature = "yaml")]
+#[test]
+fn yaml_enum_errors_are_located() {
+    let source = include_str!("fixtures/enums.yaml").replace("port: !Port 8080", "port: !Turbo 8080");
+    let err = Deployment::load_str(&source, &cfgy::Yaml).unwrap_err();
+    // saphyr places a tagged scalar at its text, after the tag.
+    assert_eq!(
+        err.to_string(),
+        "3:14: `port`: unknown variant `Turbo` of External, expected one of `Off`, `Port`, `Pair`, `Serve`, `Wrapped`"
+    );
+}
