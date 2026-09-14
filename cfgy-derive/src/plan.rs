@@ -41,6 +41,8 @@ pub struct FieldPlan {
     pub ty: Type,
     /// Used for an absent key; without one, the type's `FromValue::from_missing` decides.
     pub default: Option<FieldDefault>,
+    /// `#[config(unchecked)]`: the field's shape is `Shape::Any`, so the compile-time check accepts any value.
+    pub unchecked: bool,
 }
 
 /// A field's `#[config(default)]` or `#[config(default = <expr>)]`.
@@ -124,7 +126,14 @@ fn named_fields<'a>(
             error.combine(Error::new(first.key_span, "first used here"));
             errors.push(error);
         }
-        plans.push(FieldPlan { ident, key, key_span, ty: field.ty.clone(), default: options.default });
+        plans.push(FieldPlan {
+            ident,
+            key,
+            key_span,
+            ty: field.ty.clone(),
+            default: options.default,
+            unchecked: options.unchecked.is_some(),
+        });
     }
     plans
 }
@@ -159,6 +168,7 @@ struct Options {
     rename_all: Option<LitStr>,
     rename: Option<LitStr>,
     default: Option<FieldDefault>,
+    unchecked: Option<Ident>,
 }
 
 /// Parses every `#[config(...)]` in `attrs`, pushing errors instead of stopping at the first.
@@ -194,6 +204,7 @@ fn parse_option(options: &mut Options, meta: &ParseNestedMeta, site: Site, error
             };
             (Site::Field, options.default.replace(default).is_some())
         }
+        "unchecked" => (Site::Field, options.unchecked.replace(key.clone()).is_some()),
         _ => {
             errors.push(meta.error(format!("unknown `config` option `{key}`")));
             return skip_value(meta);
@@ -528,6 +539,17 @@ mod tests {
             }
         });
         assert_eq!(errors, ["duplicate config key `PORT`", "first used here"]);
+    }
+
+    #[test]
+    fn unchecked_is_a_field_flag() {
+        let plan = build(&parse_quote! { struct S { #[config(unchecked)] a: u8, b: u8 } }).unwrap();
+        assert!(named(&plan)[0].unchecked);
+        assert!(!named(&plan)[1].unchecked);
+        let msg = error(&parse_quote! { #[config(unchecked)] struct S { a: u8 } });
+        assert_eq!(msg, "`unchecked` is a field-level option and cannot be used on the struct");
+        let msg = error(&parse_quote! { struct S(#[config(unchecked)] u8); });
+        assert_eq!(msg, "`config` attributes are not supported on tuple struct fields");
     }
 
     #[test]

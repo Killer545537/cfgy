@@ -1,4 +1,4 @@
-use cfgy::{ConfigError, FromConfig, FromValue, IndexMap, PathStack, Value};
+use cfgy::{ConfigError, Field, FromConfig, FromValue, IndexMap, PathStack, Shape, Value};
 
 fn table(entries: &[(&str, Value)]) -> Value {
     Value::Map(entries.iter().map(|(key, value)| ((*key).to_owned(), value.clone())).collect::<IndexMap<_, _>>())
@@ -105,7 +105,7 @@ struct MaybeLevel(Option<u8>);
 #[derive(FromConfig, Debug, PartialEq)]
 struct Endpoint(String, Port);
 
-#[derive(FromConfig, Debug, PartialEq)]
+#[derive(FromConfig, Debug, Default, PartialEq)]
 struct Marker;
 
 #[derive(FromConfig, Debug, PartialEq)]
@@ -162,4 +162,81 @@ fn struct_kinds_nest_inside_named_structs() {
     let value = table(&[("endpoint", Value::Seq(vec![Value::Str("h".to_owned()), Value::Int(81)]))]);
     let err = load::<Shapes>(&value).unwrap_err();
     assert!(matches!(err, ConfigError::Missing { ref path, .. } if path == "port"), "{err:?}");
+}
+
+#[derive(FromConfig)]
+#[config(rename_all = "camelCase")]
+#[allow(dead_code, reason = "only the shape is inspected")]
+struct Settings {
+    listen_port: Port,
+    endpoint: Endpoint,
+    #[config(default)]
+    marker: Marker,
+    #[config(rename = "raw", unchecked)]
+    extra: u8,
+}
+
+/// The shape of `T`, rendered for comparison: shapes are consts, so their addresses are not meaningful.
+fn shape_of<T: FromValue>() -> String {
+    format!("{:?}", T::SHAPE)
+}
+
+#[test]
+fn derived_structs_describe_their_shape() {
+    let Shape::Table { name: "Settings", fields } = <Settings as FromValue>::SHAPE else {
+        panic!("expected a table, got {:?}", <Settings as FromValue>::SHAPE);
+    };
+    let [
+        Field { key: "listenPort", shape: port, has_default: false },
+        Field { key: "endpoint", shape: Shape::Tuple([first, second]), has_default: false },
+        Field { key: "marker", shape: Shape::Null, has_default: true },
+        Field { key: "raw", shape: Shape::Any, has_default: false },
+    ] = fields
+    else {
+        panic!("unexpected fields: {fields:?}");
+    };
+    // A newtype has its inner type's shape, including inside a tuple struct.
+    assert_eq!(format!("{port:?}"), shape_of::<u16>());
+    assert_eq!(shape_of::<Port>(), shape_of::<u16>());
+    assert_eq!(format!("{first:?}"), shape_of::<String>());
+    assert_eq!(format!("{second:?}"), shape_of::<u16>());
+    assert!(matches!(<Marker as FromValue>::SHAPE, Shape::Null));
+}
+
+#[derive(FromConfig, Debug, PartialEq)]
+#[allow(clippy::use_self, reason = "the derive must detect recursion spelled with the type name")]
+struct Node {
+    name: String,
+    children: Vec<Node>,
+}
+
+#[derive(FromConfig)]
+#[allow(dead_code, reason = "only the shape is inspected")]
+struct Team {
+    members: Vec<Member>,
+}
+
+#[derive(FromConfig)]
+#[allow(dead_code, reason = "only the shape is inspected")]
+struct Member {
+    #[config(unchecked)]
+    team: Option<Box<Team>>,
+}
+
+#[test]
+fn recursive_structs_compile_with_any_for_the_recursive_field() {
+    let Shape::Table { name: "Node", fields: [name, children] } = <Node as FromValue>::SHAPE else {
+        panic!("expected a two-field table, got {:?}", <Node as FromValue>::SHAPE);
+    };
+    assert_eq!(format!("{:?}", name.shape), shape_of::<String>());
+    assert!(matches!(children, Field { key: "children", shape: Shape::Any, has_default: false }));
+
+    let leaf = table(&[("name", Value::Str("leaf".to_owned())), ("children", Value::Seq(vec![]))]);
+    let root = table(&[("name", Value::Str("root".to_owned())), ("children", Value::Seq(vec![leaf]))]);
+    let node: Node = load(&root).unwrap();
+    assert_eq!(node.children, [Node { name: "leaf".to_owned(), children: vec![] }]);
+
+    // Mutual recursion is broken by `unchecked`; evaluating the shapes must not cycle.
+    assert!(matches!(<Team as FromValue>::SHAPE, Shape::Table { name: "Team", .. }));
+    assert!(matches!(<Member as FromValue>::SHAPE, Shape::Table { fields: [Field { shape: Shape::Any, .. }], .. }));
 }

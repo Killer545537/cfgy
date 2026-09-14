@@ -63,6 +63,7 @@ pub fn check_fields(fields: &[FieldPlan], root: &Value) -> Vec<String> {
         path.with_key(&field.key, |path| match map.get(&field.key) {
             None if required => errors.push(ConfigError::missing(path).to_string()),
             Some(Value::Null) if optional.is_some() => {}
+            Some(_) if field.unchecked => {}
             None => {}
             Some(value) => check_type(optional.unwrap_or(&field.ty), value, path, &mut errors),
         });
@@ -349,6 +350,13 @@ mod tests {
         let input = parse_quote! { struct S { host: String, port: u16 } };
         let errors = errors(&input, &map(&[("host", Value::Int(1)), ("port", Value::Bool(true))]));
         assert_eq!(errors, ["`host`: expected string, found integer", "`port`: expected u16, found bool"]);
+    }
+
+    #[test]
+    fn unchecked_field_value_is_not_checked_but_still_required() {
+        let input = parse_quote! { struct S { #[config(unchecked)] port: u16 } };
+        assert_eq!(errors(&input, &map(&[("port", Value::Str("x".into()))])), NONE);
+        assert_eq!(one_error(&input, &map(&[])), "missing required key `port`");
     }
 
     #[test]

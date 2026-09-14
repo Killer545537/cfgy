@@ -1,7 +1,8 @@
 //! Back end of the derive: turns a [`StructPlan`] into the emitted impls.
 
-use proc_macro2::{Literal, TokenStream as TokenStream2};
-use quote::{format_ident, quote};
+use proc_macro2::{Ident, Literal, TokenStream as TokenStream2, TokenTree};
+use quote::{ToTokens, format_ident, quote};
+use syn::ext::IdentExt;
 use syn::{LitStr, Type};
 
 use crate::plan::{FieldDefault, FieldPlan, SourcePlan, StructKind, StructPlan};
@@ -18,15 +19,67 @@ pub fn expand(plan: &StructPlan) -> TokenStream2 {
         },
         StructKind::Unit => unit_body(),
     };
+    let shape = shape(plan);
     let load = plan.source.as_ref().map(|source| load_impl(plan, source));
     quote! {
         #[automatically_derived]
         impl #impl_generics ::cfgy::FromValue for #ident #ty_generics #where_clause {
+            const SHAPE: &'static ::cfgy::Shape = #shape;
+
             #body
         }
 
         #load
     }
+}
+
+/// The `FromValue::SHAPE` of the derived type, mirroring what its `from_value` accepts.
+fn shape(plan: &StructPlan) -> TokenStream2 {
+    let ident = &plan.ident;
+    match &plan.kind {
+        StructKind::Named(fields) => {
+            let name = LitStr::new(&ident.unraw().to_string(), ident.span());
+            let fields = fields.iter().map(|field| {
+                let key = LitStr::new(&field.key, field.key_span);
+                let shape = field_shape(&field.ty, field.unchecked, ident);
+                let has_default = field.default.is_some();
+                quote! { ::cfgy::Field { key: #key, shape: #shape, has_default: #has_default } }
+            });
+            quote! { &::cfgy::Shape::Table { name: #name, fields: &[#(#fields),*] } }
+        }
+        StructKind::Tuple(types) => {
+            let mut shapes = types.iter().map(|ty| field_shape(ty, false, ident));
+            match (shapes.next(), shapes.next()) {
+                (Some(inner), None) => inner,
+                (first, second) => {
+                    let shapes = first.into_iter().chain(second).chain(shapes);
+                    quote! { &::cfgy::Shape::Tuple(&[#(#shapes),*]) }
+                }
+            }
+        }
+        StructKind::Unit => quote! { &::cfgy::Shape::Null },
+    }
+}
+
+/// `<ty as FromValue>::SHAPE`, or `Shape::Any` for an `unchecked` field or one whose type names the struct itself.
+///
+/// A shape that reaches its own type through consts is a cycle error (E0391), so recursion is cut at the field that
+/// spells it. Mutual recursion through another type is not visible here; `#[config(unchecked)]` breaks that cycle.
+fn field_shape(ty: &Type, unchecked: bool, ident: &Ident) -> TokenStream2 {
+    if unchecked || mentions(ty.to_token_stream(), ident) {
+        quote! { &::cfgy::Shape::Any }
+    } else {
+        quote! { <#ty as ::cfgy::FromValue>::SHAPE }
+    }
+}
+
+/// Whether `tokens` contain `Self` or `ident` anywhere, including inside generic arguments and macro invocations.
+fn mentions(tokens: TokenStream2, ident: &Ident) -> bool {
+    tokens.into_iter().any(|tree| match tree {
+        TokenTree::Ident(found) => found == "Self" || found.unraw() == ident.unraw(),
+        TokenTree::Group(group) => mentions(group.stream(), ident),
+        TokenTree::Punct(_) | TokenTree::Literal(_) => false,
+    })
 }
 
 /// A struct with named fields reads a table.
@@ -183,7 +236,7 @@ fn load_impl(plan: &StructPlan, source: &SourcePlan) -> TokenStream2 {
 /// `ident: <lookup>,` for one field: a present value converts; an absent key takes the `default` if one is given,
 /// else `FromValue::from_missing` (so `Option` and aliases of it are optional), else is a missing-key error.
 fn field_init(field: &FieldPlan) -> TokenStream2 {
-    let FieldPlan { ident, key, key_span, ty, default } = field;
+    let FieldPlan { ident, key, key_span, ty, default, .. } = field;
     let key = LitStr::new(key, *key_span);
     let absent = match default {
         Some(FieldDefault::Trait) => quote! { ::core::default::Default::default() },
@@ -254,6 +307,63 @@ mod tests {
         assert!(out.contains(":: core :: default :: Default :: default ()"), "{out}");
         assert!(!out.contains("DefaultFrom"), "{out}");
         assert!(!out.contains("ConfigError :: missing"), "{out}");
+    }
+
+    #[test]
+    fn named_struct_shape_lists_its_fields() {
+        let out = expand_str(&parse_quote! {
+            struct Settings {
+                #[config(rename = "type")]
+                kind: String,
+                #[config(default)]
+                tags: Vec<String>,
+                #[config(unchecked)]
+                extra: u8,
+            }
+        });
+        let expected = quote! {
+            const SHAPE: &'static ::cfgy::Shape = &::cfgy::Shape::Table {
+                name: "Settings",
+                fields: &[
+                    ::cfgy::Field { key: "type", shape: <String as ::cfgy::FromValue>::SHAPE, has_default: false },
+                    ::cfgy::Field { key: "tags", shape: <Vec<String> as ::cfgy::FromValue>::SHAPE, has_default: true },
+                    ::cfgy::Field { key: "extra", shape: &::cfgy::Shape::Any, has_default: false }
+                ]
+            };
+        };
+        assert!(out.contains(&expected.to_string()), "{out}");
+    }
+
+    #[test]
+    fn self_referencing_fields_have_any_shape() {
+        let out = expand_str(&parse_quote! {
+            struct Node {
+                children: Vec<Node>,
+                parent: Option<Box<Self>>,
+                weights: std::collections::HashMap<String, (u8, crate::Node)>,
+                name: String,
+            }
+        });
+        assert_eq!(out.matches("shape : & :: cfgy :: Shape :: Any").count(), 3, "{out}");
+        assert!(out.contains("shape : < String as :: cfgy :: FromValue > :: SHAPE"), "{out}");
+        assert!(!out.contains("< Vec < Node > as :: cfgy :: FromValue > :: SHAPE"), "{out}");
+
+        let out = expand_str(&parse_quote! { struct Tree(Vec<Tree>); });
+        assert!(out.contains("const SHAPE : & 'static :: cfgy :: Shape = & :: cfgy :: Shape :: Any ;"), "{out}");
+        assert!(!mentions(quote!(Vec<Nodes>), &format_ident!("Node")));
+        assert!(mentions(quote!(r#Node), &format_ident!("Node")));
+    }
+
+    #[test]
+    fn tuple_newtype_and_unit_shapes() {
+        let out = expand_str(&parse_quote! { struct Port(u16); });
+        assert!(out.contains("const SHAPE : & 'static :: cfgy :: Shape = < u16 as :: cfgy :: FromValue > :: SHAPE ;"));
+        let out = expand_str(&parse_quote! { struct Pair(String, u8); });
+        let tuple = "& :: cfgy :: Shape :: Tuple (& [< String as :: cfgy :: FromValue > :: SHAPE , < u8 as :: cfgy \
+                     :: FromValue > :: SHAPE])";
+        assert!(out.contains(tuple), "{out}");
+        let out = expand_str(&parse_quote! { struct Marker; });
+        assert!(out.contains("const SHAPE : & 'static :: cfgy :: Shape = & :: cfgy :: Shape :: Null ;"), "{out}");
     }
 
     #[test]

@@ -1,5 +1,35 @@
 #[automatically_derived]
 impl ::cfgy::FromValue for Settings {
+    const SHAPE: &'static ::cfgy::Shape = &::cfgy::Shape::Table {
+        name: "Settings",
+        fields: &[
+            ::cfgy::Field {
+                key: "type",
+                shape: <String as ::cfgy::FromValue>::SHAPE,
+                has_default: false,
+            },
+            ::cfgy::Field {
+                key: "server",
+                shape: <Server as ::cfgy::FromValue>::SHAPE,
+                has_default: false,
+            },
+            ::cfgy::Field {
+                key: "replicas",
+                shape: <Vec<Server> as ::cfgy::FromValue>::SHAPE,
+                has_default: false,
+            },
+            ::cfgy::Field {
+                key: "description",
+                shape: <Option<String> as ::cfgy::FromValue>::SHAPE,
+                has_default: false,
+            },
+            ::cfgy::Field {
+                key: "timeout_secs",
+                shape: <u64 as ::cfgy::FromValue>::SHAPE,
+                has_default: true,
+            },
+        ],
+    };
     fn from_value(
         __cfgy_value: &::cfgy::Value,
         __cfgy_path: &mut ::cfgy::PathStack,
