@@ -108,6 +108,20 @@ pub const fn check_node(root: &Shape, doc: &Node, path: &[usize], prefix: &str) 
             message.push(key);
             message.push("`");
         }
+        Verdict::UnknownVariant(found, name, variants) => {
+            message.push(": unknown variant `");
+            message.push(found);
+            message.push("` of ");
+            message.push(name);
+            message.push(", expected one of ");
+            let mut rest = variants;
+            while let [variant, tail @ ..] = rest {
+                message.push("`");
+                message.push(variant.name);
+                message.push(if tail.is_empty() { "`" } else { "`, " });
+                rest = tail;
+            }
+        }
         Verdict::NoVariant(name) => {
             message.push(": ");
             message.push(node.kind());
@@ -128,7 +142,9 @@ enum Verdict {
     Length(usize, usize),
     /// A required key absent from a table.
     Missing(&'static str),
-    /// The enum's name.
+    /// A tag naming no variant: the tag, the enum's name, and its variants.
+    UnknownVariant(&'static str, &'static str, &'static [Variant]),
+    /// The enum's name, for a value that names no variant at all.
     NoVariant(&'static str),
 }
 
@@ -157,7 +173,19 @@ const fn local(shape: &Shape, node: &Node) -> Verdict {
         }
         (Shape::Table { fields, .. }, Node::Map(entries)) => return missing(fields, entries),
         (Shape::Enum { name, repr, variants }, _) => {
-            let Some(variant) = select_variant_locally(*repr, variants, node) else { return Verdict::NoVariant(name) };
+            let Some(variant) = select_variant_locally(*repr, variants, node) else {
+                return match (repr, node) {
+                    (Repr::Internal { tag } | Repr::Adjacent { tag, .. }, Node::Map(entries))
+                        if entry(entries, tag).is_none() =>
+                    {
+                        Verdict::Missing(tag)
+                    }
+                    _ => match unknown_tag(*repr, variants, node) {
+                        Some(found) => Verdict::UnknownVariant(found, name, variants),
+                        None => Verdict::NoVariant(name),
+                    },
+                };
+            };
             return match (repr, variant.payload, node) {
                 (Repr::Internal { .. }, Some(Shape::Table { fields, .. }), Node::Map(entries)) => {
                     missing(fields, entries)
@@ -290,6 +318,19 @@ const fn select_variant_locally<'a>(repr: Repr, variants: &'a [Variant], node: &
         (Repr::Untagged, _) => untagged_variant(variants, node),
         _ => None,
     }
+}
+
+/// The tag `node` is written with when it names none of `variants`.
+const fn unknown_tag(repr: Repr, variants: &[Variant], node: &Node) -> Option<&'static str> {
+    let found = match (repr, node) {
+        (Repr::External, Node::Str(name) | Node::Map([(name, _)])) => name,
+        (Repr::Internal { tag } | Repr::Adjacent { tag, .. }, Node::Map(entries)) => match entry(entries, tag) {
+            Some(Node::Str(name)) => name,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    if find_variant(variants, found).is_none() { Some(found) } else { None }
 }
 
 /// The first variant whose payload `node` conforms to; a unit variant matches null.
@@ -805,12 +846,42 @@ mod tests {
         fails(<(u8, u8, u8)>::SHAPE, &Node::Seq(&[Node::Int(1)]), &[], "at: expected a sequence of 3 items, found 1");
         fails(<(u8,)>::SHAPE, &Node::Str("x"), &[], "at: expected sequence, found string");
         fails(&SERVER, &Node::Map(&[("port", Node::Int(1))]), &[], "at: missing required key `host`");
-        fails(&EXTERNAL, &Node::Str("Nope"), &[], "at: string matches no variant of Mode");
+        fails(
+            &EXTERNAL,
+            &Node::Str("Nope"),
+            &[],
+            "at: unknown variant `Nope` of Mode, expected one of `Off`, `Port`, `Serve`",
+        );
+        fails(
+            &EXTERNAL,
+            &Node::Map(&[("Nope", Node::Null)]),
+            &[],
+            "at: unknown variant `Nope` of Mode, expected one of `Off`, `Port`, `Serve`",
+        );
+        // A known name written in the wrong form, or no name at all.
+        fails(&EXTERNAL, &Node::Str("Port"), &[], "at: string matches no variant of Mode");
+        fails(&EXTERNAL, &Node::Map(&[]), &[], "at: table matches no variant of Mode");
         fails(&EXTERNAL, &Node::Int(1), &[], "at: integer matches no variant of Mode");
         fails(&INTERNAL, &Node::Map(&[("type", Node::Str("Serve"))]), &[], "at: missing required key `host`");
-        fails(&INTERNAL, &Node::Map(&[]), &[], "at: table matches no variant of Mode");
+        fails(
+            &INTERNAL,
+            &Node::Map(&[("type", Node::Str("On"))]),
+            &[],
+            "at: unknown variant `On` of Mode, expected one of `Off`, `Serve`",
+        );
+        fails(&INTERNAL, &Node::Map(&[]), &[], "at: missing required key `type`");
+        fails(&INTERNAL, &Node::Map(&[("type", Node::Int(1))]), &[], "at: table matches no variant of Mode");
+        fails(&INTERNAL, &Node::Str("Off"), &[], "at: string matches no variant of Mode");
+        fails(
+            &ADJACENT,
+            &Node::Map(&[("t", Node::Str("x")), ("c", Node::Null)]),
+            &[],
+            "at: unknown variant `x` of Mode, expected one of `Off`, `Port`, `Serve`",
+        );
+        fails(&ADJACENT, &Node::Map(&[("c", Node::Null)]), &[], "at: missing required key `t`");
         fails(&ADJACENT, &Node::Map(&[("t", Node::Str("Port"))]), &[], "at: missing required key `c`");
         fails(&UNTAGGED, &Node::Bool(true), &[], "at: bool matches no variant of Mode");
+        fails(&UNTAGGED, &Node::Str("Nope"), &[], "at: string matches no variant of Mode");
     }
 
     #[test]
