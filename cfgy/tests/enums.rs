@@ -427,9 +427,9 @@ fn derived_enums_describe_their_shape() {
     assert!(matches!(Empty::SHAPE, Shape::Enum { name: "Empty", variants: [], .. }));
 }
 
-// ponytail: `check = false` until the compile-time check handles enums.
+/// Checked at compile time: every enum representation in the fixture conforms to its shape.
 #[derive(FromConfig, Debug, PartialEq)]
-#[config(path = "tests/fixtures/enums.toml", check = false)]
+#[config(path = "tests/fixtures/enums.toml")]
 struct Deployment {
     mode: External,
     port: External,
