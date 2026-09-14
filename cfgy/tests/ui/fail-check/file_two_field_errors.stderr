@@ -1,0 +1,37 @@
+error[E0080]: evaluation panicked: fixtures/fail-check/file_two_field_errors.toml:1:1: `<root>`: missing required key `host`
+ --> tests/ui/fail-check/file_two_field_errors.rs:5:17
+  |
+4 | #[derive(FromConfig)]
+  |          ---------- in this derive macro expansion
+5 | #[config(path = "fixtures/fail-check/file_two_field_errors.toml")]
+  |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `_::_` failed inside this call
+  |
+note: inside `cfgy::__private::check_node`
+ --> $RUST/core/src/panic.rs
+  |
+  |         $crate::panicking::panic_display(&$arg);
+  |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the failure occurred here
+  |
+ ::: $WORKSPACE/cfgy-core/src/check.rs
+  |
+  |     panic!("{}", message.as_str())
+  |     ------------------------------ in this macro invocation
+
+error[E0080]: evaluation panicked: fixtures/fail-check/file_two_field_errors.toml:1:8: `port`: expected u16, found string
+ --> tests/ui/fail-check/file_two_field_errors.rs:5:17
+  |
+4 | #[derive(FromConfig)]
+  |          ---------- in this derive macro expansion
+5 | #[config(path = "fixtures/fail-check/file_two_field_errors.toml")]
+  |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `_::_` failed inside this call
+  |
+note: inside `cfgy::__private::check_node`
+ --> $RUST/core/src/panic.rs
+  |
+  |         $crate::panicking::panic_display(&$arg);
+  |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the failure occurred here
+  |
+ ::: $WORKSPACE/cfgy-core/src/check.rs
+  |
+  |     panic!("{}", message.as_str())
+  |     ------------------------------ in this macro invocation

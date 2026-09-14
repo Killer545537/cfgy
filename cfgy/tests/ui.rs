@@ -19,9 +19,13 @@
 //! trybuild builds the cases with the features this test was built with, so the default run only has TOML.
 //!
 //! - `fail-json/`, `fail-yaml/`: need their format feature; with it off the file would fail for a different reason.
+//! - `fail-check/`: the compile-time check's const-evaluation errors, whose rendering (notes and
+//!   source snippets from `core`) differs between rustc channels and versions. They are blessed on stable and run
+//!   only with a stable rustc; the derive's unit tests and core's parity tests carry the coverage elsewhere.
 
 use std::path::Path;
-use std::{fs, io};
+use std::process::Command;
+use std::{env, fs, io};
 
 /// Extensions of the config files copied into the trybuild project.
 const FIXTURE_EXTENSIONS: [&str; 3] = ["toml", "json", "yaml"];
@@ -39,6 +43,16 @@ fn copy_fixtures(src: &Path, dst: &Path) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Whether the `rustc` that builds the cases is a stable release: the one `RUSTC` names, else `rustc` on the path,
+/// which rustup resolves to the toolchain running this test. `false` if it cannot be asked.
+fn stable_rustc() -> bool {
+    let rustc = env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+    Command::new(rustc).arg("--version").output().is_ok_and(|output| {
+        let version = String::from_utf8_lossy(&output.stdout);
+        output.status.success() && !["nightly", "beta", "dev"].iter().any(|channel| version.contains(channel))
+    })
 }
 
 #[test]
@@ -60,5 +74,8 @@ fn ui() {
     }
     if cfg!(feature = "yaml") {
         t.compile_fail("tests/ui/fail-yaml/*.rs");
+    }
+    if stable_rustc() {
+        t.compile_fail("tests/ui/fail-check/*.rs");
     }
 }
