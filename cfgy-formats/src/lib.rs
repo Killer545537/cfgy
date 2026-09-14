@@ -65,12 +65,9 @@ fn feature_name(explicit: Option<&str>, path: &Path, source: &str) -> Result<&'s
 }
 
 fn by_name(name: &str) -> Option<&'static str> {
-    match name {
-        "toml" => Some("toml"),
-        "json" => Some("json"),
-        "yaml" | "yml" => Some("yaml"),
-        _ => None,
-    }
+    [("toml", "toml"), ("json", "json"), ("yaml", "yaml"), ("yml", "yaml")]
+        .into_iter()
+        .find_map(|(alias, feature)| alias.eq_ignore_ascii_case(name).then_some(feature))
 }
 
 fn enabled(feature: &'static str) -> Result<&'static dyn Format, SelectError> {
@@ -101,9 +98,19 @@ mod tests {
     fn precedence() {
         assert_eq!(name(Some("yml"), "app.toml", ""), Ok("yaml"));
         assert_eq!(name(None, "app.toml", "{"), Ok("toml"));
+        assert_eq!(name(None, "dir.d/app.JSON", ""), Ok("json"));
+    }
+
+    #[test]
+    fn extensions_ignore_case() {
+        assert_eq!(name(None, "app.TOML", ""), Ok("toml"));
+        assert_eq!(name(None, "app.Json", ""), Ok("json"));
+        assert_eq!(name(None, "app.YML", ""), Ok("yaml"));
+        assert_eq!(name(None, "app.YaMl", ""), Ok("yaml"));
+        assert_eq!(name(Some("TOML"), "app", ""), Ok("toml"));
         assert_eq!(
-            name(None, "dir.d/app.JSON", ""),
-            Err("unknown extension `.JSON`, expected .toml, .json, .yaml, or .yml".to_owned())
+            name(None, "app.Ini", ""),
+            Err("unknown extension `.Ini`, expected .toml, .json, .yaml, or .yml".to_owned())
         );
     }
 

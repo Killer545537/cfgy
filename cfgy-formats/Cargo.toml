@@ -12,7 +12,7 @@ categories.workspace = true
 [features]
 toml = ["dep:toml"]
 json = ["dep:serde_json"]
-yaml = ["dep:saphyr"]
+yaml = ["dep:saphyr", "dep:saphyr-parser"]
 
 [dependencies]
 cfgy-core.workspace = true
@@ -20,6 +20,8 @@ indexmap.workspace = true
 toml = { workspace = true, optional = true, features = ["preserve_order"] }
 serde_json = { workspace = true, optional = true, features = ["preserve_order", "float_roundtrip"] }
 saphyr = { workspace = true, optional = true }
+# Already in the graph through saphyr, which does not re-export `Parser`; needed to load with `early_parse(false)`.
+saphyr-parser = { version = "0.0.12", optional = true }
 
 [dev-dependencies]
 proptest.workspace = true
