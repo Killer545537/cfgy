@@ -16,7 +16,6 @@ pub struct StructPlan {
 }
 
 /// The field layout of the derived struct, or the variants of the derived enum.
-#[allow(dead_code, reason = "read by codegen once enums convert")]
 pub enum StructKind {
     /// `struct S { .. }`: reads a table.
     Named(Vec<FieldPlan>),
@@ -29,7 +28,6 @@ pub enum StructKind {
 }
 
 /// How an enum's variant is written in the file: serde's four enum representations.
-#[allow(dead_code, reason = "read by codegen once enums convert")]
 pub enum EnumRepr {
     /// The default: `"Unit"`, or a single-key table `{ Variant = payload }`.
     External,
@@ -42,7 +40,6 @@ pub enum EnumRepr {
 }
 
 /// One enum variant and the name it is written as.
-#[allow(dead_code, reason = "read by codegen once enums convert")]
 pub struct VariantPlan {
     pub ident: Ident,
     /// Its `rename`, else its name converted by the enum's `rename_all`, else its name.
@@ -52,7 +49,6 @@ pub struct VariantPlan {
 }
 
 /// The payload of a variant.
-#[allow(dead_code, reason = "read by codegen once enums convert")]
 pub enum VariantKind {
     /// `V`: no payload.
     Unit,
