@@ -135,7 +135,8 @@ fn nested_error_path_includes_the_index() {
          replicas = [{{ host = \"b\", port = 2 }}, {{ host = \"c\", port = \"eighty\" }}]\n"
     );
     let err = Settings::load_str(&source, &cfgy::Toml).unwrap_err();
-    assert_eq!(err.to_string(), "`replicas[1].port`: expected u16, found string");
+    // Line 4 of the source, where `"eighty"` starts.
+    assert_eq!(err.to_string(), "4:60: `replicas[1].port`: expected u16, found string");
 }
 
 #[test]
