@@ -1,4 +1,5 @@
-use cfgy::{ConfigError, FromConfig, FromValue, IndexMap, PathStack, Value};
+use cfgy::check::{Node, conforms};
+use cfgy::{ConfigError, Field, FromConfig, FromValue, IndexMap, PathStack, Repr, Shape, Value, Variant};
 
 fn table(entries: &[(&str, Value)]) -> Value {
     Value::Map(entries.iter().map(|(key, value)| ((*key).to_owned(), value.clone())).collect::<IndexMap<_, _>>())
@@ -261,4 +262,167 @@ fn recursive_and_empty_enums() {
         message::<Empty>(&Value::Null),
         "`<root>`: expected a variant of Empty, found null (the key is present but has no value)"
     );
+}
+
+/// `value` as a const-check [`Node`], leaked so it is `'static` like the macro's embedded tree.
+fn node(value: &Value) -> Node {
+    let leak = |s: &str| -> &'static str { Box::leak(s.to_owned().into_boxed_str()) };
+    match value {
+        Value::Null => Node::Null,
+        Value::Bool(b) => Node::Bool(*b),
+        Value::Int(i) => Node::Int(*i),
+        Value::Float(f) => Node::Float(*f),
+        Value::Str(s) => Node::Str(leak(s)),
+        Value::Datetime(datetime) => Node::Datetime(leak(&datetime.0)),
+        Value::Seq(items) => Node::Seq(Box::leak(items.iter().map(node).collect())),
+        Value::Map(entries) => {
+            Node::Map(Box::leak(entries.iter().map(|(key, value)| (leak(key), node(value))).collect()))
+        }
+    }
+}
+
+/// Asserts that the shape of `T` accepts exactly the `values` that `T::from_value` converts, and that both
+/// verdicts occur.
+fn assert_parity<T: FromValue>(values: &[Value]) {
+    let mut verdicts = [false; 2];
+    for value in values {
+        let converts = load::<T>(value).is_ok();
+        assert_eq!(conforms(T::SHAPE, &node(value)), converts, "{value:?}");
+        if let Some(seen) = verdicts.get_mut(usize::from(converts)) {
+            *seen = true;
+        }
+    }
+    assert_eq!(verdicts, [true, true], "cover both accepted and rejected values");
+}
+
+#[test]
+fn shapes_accept_what_from_value_accepts() {
+    let server = table(&[("host", str("h"))]);
+    assert_parity::<External>(&[
+        str("Off"),
+        str("Port"),
+        str("Nope"),
+        Value::Null,
+        Value::Int(1),
+        table(&[]),
+        table(&[("Off", Value::Null)]),
+        table(&[("Off", Value::Int(1))]),
+        table(&[("Port", Value::Int(8))]),
+        table(&[("Port", Value::Int(-8))]),
+        table(&[("Port", Value::Int(8)), ("Off", Value::Null)]),
+        table(&[("Pair", Value::Seq(vec![str("a"), Value::Int(1)]))]),
+        table(&[("Pair", Value::Seq(vec![str("a")]))]),
+        table(&[("Serve", server.clone())]),
+        table(&[("Serve", table(&[("host", str("h")), ("p", str("80"))]))]),
+        table(&[("Serve", table(&[]))]),
+        table(&[("Wrapped", server.clone())]),
+        table(&[("Wrapped", Value::Seq(vec![]))]),
+        table(&[("Nope", Value::Null)]),
+    ]);
+    assert_parity::<Internal>(&[
+        table(&[("type", str("Off")), ("junk", Value::Null)]),
+        table(&[("type", str("Serve")), ("host", str("h"))]),
+        table(&[("type", str("Serve")), ("host", str("h")), ("port", Value::Null)]),
+        table(&[("type", str("Serve")), ("host", str("h")), ("port", str("x"))]),
+        table(&[("type", str("Serve"))]),
+        table(&[("type", str("Wrapped")), ("host", str("h"))]),
+        table(&[("type", str("Wrapped")), ("host", Value::Int(1))]),
+        table(&[("type", str("Nope"))]),
+        table(&[("type", Value::Int(1))]),
+        table(&[]),
+        str("Off"),
+    ]);
+    assert_parity::<Adjacent>(&[
+        table(&[("t", str("Off"))]),
+        table(&[("t", str("Off")), ("c", Value::Null)]),
+        table(&[("t", str("Off")), ("c", Value::Int(1))]),
+        table(&[("t", str("Port")), ("c", Value::Int(1))]),
+        table(&[("t", str("Port")), ("c", str("1"))]),
+        table(&[("t", str("Port"))]),
+        table(&[("t", str("Level"))]),
+        table(&[("t", str("Level")), ("c", Value::Int(300))]),
+        table(&[("t", str("Pair")), ("c", Value::Seq(vec![str("a"), Value::Int(2)]))]),
+        table(&[("t", str("Pair")), ("c", Value::Seq(vec![]))]),
+        table(&[("c", server.clone()), ("t", str("Serve"))]),
+        table(&[("t", str("Serve"))]),
+        table(&[("t", str("Nope")), ("c", Value::Null)]),
+        table(&[("c", Value::Null)]),
+        Value::Seq(vec![]),
+    ]);
+    assert_parity::<Untagged>(&[
+        Value::Null,
+        Value::Int(8),
+        Value::Int(-8),
+        Value::Seq(vec![str("a"), Value::Int(1)]),
+        Value::Seq(vec![str("a")]),
+        server,
+        table(&[("port", Value::Int(1))]),
+        str("Off"),
+        Value::Bool(true),
+        Value::Float(1.5),
+    ]);
+    assert_parity::<Renamed>(&[
+        str("very-fast"),
+        str("VeryFast"),
+        str("slow!"),
+        table(&[("with-fields", table(&[("MAX_CONNS", Value::Int(3))]))]),
+        table(&[("with-fields", table(&[("max_conns", Value::Int(3))]))]),
+        table(&[("plain-fields", table(&[("max_conns", Value::Int(4))]))]),
+    ]);
+    assert_parity::<Modes>(&[
+        table(&[("mode", str("Off"))]),
+        table(&[("mode", str("Off")), ("fallback", table(&[("type", str("Off"))]))]),
+        table(&[("mode", str("Off")), ("fallback", table(&[("type", str("Serve"))]))]),
+        table(&[("mode", str("turbo"))]),
+        table(&[]),
+    ]);
+}
+
+#[test]
+fn derived_enums_describe_their_shape() {
+    let Shape::Enum { name: "External", repr: Repr::External, variants } = External::SHAPE else {
+        panic!("expected an enum, got {:?}", External::SHAPE);
+    };
+    let [
+        Variant { name: "Off", payload: None },
+        Variant { name: "Port", payload: Some(Shape::Int { name: "u16", .. }) },
+        Variant { name: "Pair", payload: Some(Shape::Tuple([Shape::String, Shape::Int { name: "u8", .. }])) },
+        Variant {
+            name: "Serve",
+            payload:
+                Some(Shape::Table {
+                    name: "External::Serve",
+                    fields:
+                        [
+                            Field { key: "host", shape: Shape::String, has_default: false },
+                            Field { key: "p", shape: Shape::Int { .. }, has_default: true },
+                            Field { key: "tls", shape: Shape::Optional(Shape::Bool), has_default: false },
+                        ],
+                }),
+        },
+        Variant { name: "Wrapped", payload: Some(Shape::Table { name: "Server", .. }) },
+    ] = variants
+    else {
+        panic!("unexpected variants: {variants:?}");
+    };
+    assert!(matches!(Internal::SHAPE, Shape::Enum { repr: Repr::Internal { tag: "type" }, .. }));
+    assert!(matches!(Adjacent::SHAPE, Shape::Enum { repr: Repr::Adjacent { tag: "t", content: "c" }, .. }));
+    assert!(matches!(Untagged::SHAPE, Shape::Enum { repr: Repr::Untagged, .. }));
+    assert!(matches!(
+        Renamed::SHAPE,
+        Shape::Enum { variants: [Variant { name: "very-fast", .. }, Variant { name: "slow!", .. }, ..], .. }
+    ));
+    // Recursion through the enum's own name is cut to `Any`, as for structs.
+    assert!(matches!(
+        Expr::SHAPE,
+        Shape::Enum {
+            variants: [
+                Variant { payload: Some(Shape::Int { .. }), .. },
+                Variant { payload: Some(Shape::Tuple([Shape::Any, Shape::Any])), .. },
+                Variant { payload: Some(Shape::Table { fields: [Field { shape: Shape::Any, .. }], .. }), .. },
+            ],
+            ..
+        }
+    ));
+    assert!(matches!(Empty::SHAPE, Shape::Enum { name: "Empty", variants: [], .. }));
 }

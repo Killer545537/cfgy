@@ -37,30 +37,64 @@ pub fn expand(plan: &StructPlan) -> TokenStream2 {
 /// The `FromValue::SHAPE` of the derived type, mirroring what its `from_value` accepts.
 fn shape(plan: &StructPlan) -> TokenStream2 {
     let ident = &plan.ident;
+    let name = ident.unraw().to_string();
     match &plan.kind {
-        StructKind::Named(fields) => {
-            let name = LitStr::new(&ident.unraw().to_string(), ident.span());
-            let fields = fields.iter().map(|field| {
-                let key = LitStr::new(&field.key, field.key_span);
-                let shape = field_shape(&field.ty, field.unchecked, ident);
-                let has_default = field.default.is_some();
-                quote! { ::cfgy::Field { key: #key, shape: #shape, has_default: #has_default } }
-            });
-            quote! { &::cfgy::Shape::Table { name: #name, fields: &[#(#fields),*] } }
-        }
-        StructKind::Tuple(types) => {
-            let mut shapes = types.iter().map(|ty| field_shape(ty, false, ident));
-            match (shapes.next(), shapes.next()) {
-                (Some(inner), None) => inner,
-                (first, second) => {
-                    let shapes = first.into_iter().chain(second).chain(shapes);
-                    quote! { &::cfgy::Shape::Tuple(&[#(#shapes),*]) }
-                }
-            }
-        }
+        StructKind::Named(fields) => table_shape(&name, fields, ident),
+        StructKind::Tuple(types) => match types.as_slice() {
+            [inner] => field_shape(inner, false, ident),
+            _ => tuple_shape(types, ident),
+        },
         StructKind::Unit => quote! { &::cfgy::Shape::Null },
-        StructKind::Enum { .. } => quote! { &::cfgy::Shape::Any },
+        StructKind::Enum { repr, variants } => {
+            let repr = match repr {
+                EnumRepr::External => quote! { ::cfgy::Repr::External },
+                EnumRepr::Internal { tag } => quote! { ::cfgy::Repr::Internal { tag: #tag } },
+                EnumRepr::Adjacent { tag, content } => {
+                    quote! { ::cfgy::Repr::Adjacent { tag: #tag, content: #content } }
+                }
+                EnumRepr::Untagged => quote! { ::cfgy::Repr::Untagged },
+            };
+            let variants = variants.iter().map(|variant| {
+                let variant_name = LitStr::new(&variant.name, variant.name_span);
+                let payload = match &variant.kind {
+                    VariantKind::Unit => quote! { ::core::option::Option::None },
+                    VariantKind::Newtype(ty) => {
+                        let shape = field_shape(ty, false, ident);
+                        quote! { ::core::option::Option::Some(#shape) }
+                    }
+                    VariantKind::Tuple(types) => {
+                        let shape = tuple_shape(types, ident);
+                        quote! { ::core::option::Option::Some(#shape) }
+                    }
+                    VariantKind::Struct(fields) => {
+                        let shape = table_shape(&format!("{name}::{}", variant.ident.unraw()), fields, ident);
+                        quote! { ::core::option::Option::Some(#shape) }
+                    }
+                };
+                quote! { ::cfgy::Variant { name: #variant_name, payload: #payload } }
+            });
+            let name = LitStr::new(&name, ident.span());
+            quote! { &::cfgy::Shape::Enum { name: #name, repr: #repr, variants: &[#(#variants),*] } }
+        }
     }
+}
+
+/// A `Shape::Table` named `name` listing `fields`, with recursion into `ident` cut as in [`field_shape`].
+fn table_shape(name: &str, fields: &[FieldPlan], ident: &Ident) -> TokenStream2 {
+    let name = LitStr::new(name, ident.span());
+    let fields = fields.iter().map(|field| {
+        let key = LitStr::new(&field.key, field.key_span);
+        let shape = field_shape(&field.ty, field.unchecked, ident);
+        let has_default = field.default.is_some();
+        quote! { ::cfgy::Field { key: #key, shape: #shape, has_default: #has_default } }
+    });
+    quote! { &::cfgy::Shape::Table { name: #name, fields: &[#(#fields),*] } }
+}
+
+/// A `Shape::Tuple` of `types`, with recursion into `ident` cut as in [`field_shape`].
+fn tuple_shape(types: &[Type], ident: &Ident) -> TokenStream2 {
+    let shapes = types.iter().map(|ty| field_shape(ty, false, ident));
+    quote! { &::cfgy::Shape::Tuple(&[#(#shapes),*]) }
 }
 
 /// `<ty as FromValue>::SHAPE`, or `Shape::Any` for an `unchecked` field or one whose type names the struct itself.
@@ -653,6 +687,59 @@ mod tests {
                            \"`Off`, `Port`, `Serve`\") ,)";
     const MISMATCH: &str =
         "Err (:: cfgy :: ConfigError :: type_mismatch (__cfgy_path , \"a variant of Mode\" , __cfgy_value))";
+
+    #[test]
+    fn enum_shape_lists_its_variants() {
+        let out = expand_str(&parse_quote! {
+            #[config(tag = "t", content = "c", rename_all = "lowercase")]
+            enum Mode {
+                Off,
+                Port(u16),
+                Pair(String, Box<Mode>),
+                Serve { #[config(default)] host: String, #[config(unchecked)] extra: u8 },
+            }
+        });
+        let expected = quote! {
+            const SHAPE: &'static ::cfgy::Shape = &::cfgy::Shape::Enum {
+                name: "Mode",
+                repr: ::cfgy::Repr::Adjacent { tag: "t", content: "c" },
+                variants: &[
+                    ::cfgy::Variant { name: "off", payload: ::core::option::Option::None },
+                    ::cfgy::Variant {
+                        name: "port",
+                        payload: ::core::option::Option::Some(<u16 as ::cfgy::FromValue>::SHAPE)
+                    },
+                    ::cfgy::Variant {
+                        name: "pair",
+                        payload: ::core::option::Option::Some(&::cfgy::Shape::Tuple(&[
+                            <String as ::cfgy::FromValue>::SHAPE,
+                            &::cfgy::Shape::Any
+                        ]))
+                    },
+                    ::cfgy::Variant {
+                        name: "serve",
+                        payload: ::core::option::Option::Some(&::cfgy::Shape::Table {
+                            name: "Mode::Serve",
+                            fields: &[
+                                ::cfgy::Field {
+                                    key: "host",
+                                    shape: <String as ::cfgy::FromValue>::SHAPE,
+                                    has_default: true
+                                },
+                                ::cfgy::Field { key: "extra", shape: &::cfgy::Shape::Any, has_default: false }
+                            ]
+                        })
+                    }
+                ]
+            };
+        };
+        assert!(out.contains(&expected.to_string()), "{out}");
+        let out = expand_str(&parse_quote! { #[config(tag = "type")] enum Mode { A(Self) } });
+        assert!(out.contains("repr : :: cfgy :: Repr :: Internal { tag : \"type\" }"), "{out}");
+        assert!(out.contains("payload : :: core :: option :: Option :: Some (& :: cfgy :: Shape :: Any)"), "{out}");
+        let out = expand_str(&parse_quote! { #[config(untagged)] enum Mode {} });
+        assert!(out.contains("repr : :: cfgy :: Repr :: Untagged , variants : & []"), "{out}");
+    }
 
     #[test]
     fn external_enum_reads_a_name_or_a_single_entry_table() {
