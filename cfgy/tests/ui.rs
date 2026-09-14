@@ -19,7 +19,7 @@
 //! trybuild builds the cases with the features this test was built with, so the default run only has TOML.
 //!
 //! - `fail-json/`, `fail-yaml/`: need their format feature; with it off the file would fail for a different reason.
-//! - `fail-check/`: the compile-time check's const-evaluation errors, whose rendering (notes and
+//! - `fail-check/`, `fail-check-json/` (also needs `json`): the compile-time check's const-evaluation errors, whose rendering (notes and
 //!   source snippets from `core`) differs between rustc channels and versions. They are blessed on stable and run
 //!   only with a stable rustc; the derive's unit tests and core's parity tests carry the coverage elsewhere.
 
@@ -77,5 +77,8 @@ fn ui() {
     }
     if stable_rustc() {
         t.compile_fail("tests/ui/fail-check/*.rs");
+        if cfg!(feature = "json") {
+            t.compile_fail("tests/ui/fail-check-json/*.rs");
+        }
     }
 }

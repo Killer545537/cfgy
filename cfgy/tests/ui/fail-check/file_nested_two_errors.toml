@@ -1,0 +1,7 @@
+[primary]
+host = "10.0.0.1"
+port = "eighty"
+
+[replica]
+host = "10.0.0.2"
+port = 70000
