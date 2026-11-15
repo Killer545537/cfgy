@@ -9,8 +9,7 @@ error[E0080]: evaluation panicked: fixtures/fail-check/file_vec_out_of_range.tom
 note: inside `cfgy::__private::check_node`
  --> $RUST/core/src/panic.rs
   |
-  |         $crate::panicking::panic_display(&$arg);
-  |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the failure occurred here
+  = note: the failure occurred here
   |
  ::: $WORKSPACE/cfgy-core/src/check.rs
   |
