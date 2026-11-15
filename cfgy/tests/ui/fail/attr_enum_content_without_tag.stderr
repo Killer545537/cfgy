@@ -1,0 +1,5 @@
+error: `content` requires `tag`
+ --> tests/ui/fail/attr_enum_content_without_tag.rs:4:10
+  |
+4 | #[config(content = "value")]
+  |          ^^^^^^^

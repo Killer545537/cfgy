@@ -1,0 +1,5 @@
+error: tuple variants cannot be internally tagged with `tag`
+ --> tests/ui/fail/attr_enum_tuple_variant_tagged.rs:8:5
+  |
+8 |     Remote(String, u16),
+  |     ^^^^^^
