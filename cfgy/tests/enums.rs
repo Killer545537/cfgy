@@ -242,6 +242,7 @@ enum Expr {
 }
 
 #[derive(FromConfig, Debug)]
+#[allow(clippy::empty_enums, reason = "an empty enum is the case under test")]
 enum Empty {}
 
 #[test]
