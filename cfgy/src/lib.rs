@@ -111,6 +111,8 @@
 //!     data_dir: PathBuf,
 //!     #[config(default = 30)]
 //!     timeout: Option<u64>,
+//!     #[config(default = "replica")]
+//!     fallback: Option<String>,
 //!     #[config(default)]
 //!     tags: Vec<String>,
 //! }
@@ -119,11 +121,13 @@
 //! assert_eq!(settings.host, "localhost");
 //! assert_eq!(settings.data_dir, PathBuf::from("/var/lib/app"));
 //! assert_eq!(settings.timeout, Some(30));
+//! assert_eq!(settings.fallback.as_deref(), Some("replica"));
 //! assert!(settings.tags.is_empty());
 //! ```
 //!
-//! A string literal does not convert into an `Option<String>`; write `default = String::from("x")` there. An
-//! expression whose own type must be inferred, such as `"localhost".into()`, is ambiguous; drop the `.into()`.
+//! A string literal converts into `String`, `PathBuf`, `Option<String>` and `Option<PathBuf>`; any `T` converts
+//! into `Option<T>`. An expression whose own type must be inferred, such as `"localhost".into()`, is ambiguous;
+//! drop the `.into()`.
 //!
 //! # Generated API
 //!

@@ -92,7 +92,7 @@ Fields (of a struct or a struct variant):
 |---|---|
 | `rename = "type"` | Read the field from a different key. |
 | `default` | `Default::default()` when the key is absent. |
-| `default = <expr>` | `<expr>` when the key is absent. A string literal works for `String` and `PathBuf`, a `T` for `Option<T>`. |
+| `default = <expr>` | `<expr>` when the key is absent. A string literal works for `String`, `PathBuf` and their `Option`s; a `T` for `Option<T>`. |
 | `unchecked` | Accept any value in the compile-time check; still converted at runtime. |
 
 Enums and variants:
