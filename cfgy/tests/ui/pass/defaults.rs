@@ -9,6 +9,8 @@ struct Settings {
     tags: Vec<String>,
     #[config(default = "localhost")]
     host: String,
+    #[config(default = "replica")]
+    fallback: Option<String>,
     #[config(default = 30)]
     timeout_secs: u64,
 }
@@ -21,6 +23,7 @@ fn main() {
             name: "api".to_owned(),
             tags: Vec::new(),
             host: "localhost".to_owned(),
+            fallback: Some("replica".to_owned()),
             timeout_secs: 30,
         }
     );

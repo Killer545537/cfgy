@@ -35,6 +35,18 @@ impl<T> DefaultFrom<T> for Option<T> {
     }
 }
 
+impl DefaultFrom<&'static str> for Option<String> {
+    fn default_from(value: &'static str) -> Self {
+        Some(value.to_owned())
+    }
+}
+
+impl DefaultFrom<&'static str> for Option<PathBuf> {
+    fn default_from(value: &'static str) -> Self {
+        Some(PathBuf::from(value))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -49,6 +61,9 @@ mod tests {
         assert_eq!(<Option<u64> as DefaultFrom<_>>::default_from(5), Some(5));
         assert_eq!(<Option<u64> as DefaultFrom<_>>::default_from(None), None);
         assert_eq!(<Option<String> as DefaultFrom<_>>::default_from(String::from("z")), Some("z".to_owned()));
+        assert_eq!(<Option<String> as DefaultFrom<_>>::default_from("w"), Some("w".to_owned()));
+        assert_eq!(<Option<PathBuf> as DefaultFrom<_>>::default_from("c"), Some(PathBuf::from("c")));
+        assert_eq!(<Option<i8> as DefaultFrom<_>>::default_from(-1), Some(-1));
         assert_eq!(<Vec<u8> as DefaultFrom<_>>::default_from(vec![1, 2]), [1, 2]);
     }
 }
