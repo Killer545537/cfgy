@@ -1,0 +1,5 @@
+error: `path` requires a struct with named fields
+ --> tests/ui/fail/attr_path_on_unit_struct.rs:4:17
+  |
+4 | #[config(path = "config.toml")]
+  |                 ^^^^^^^^^^^^^

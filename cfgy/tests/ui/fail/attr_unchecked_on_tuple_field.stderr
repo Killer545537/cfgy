@@ -1,0 +1,5 @@
+error: `config` attributes are not supported on tuple struct fields
+ --> tests/ui/fail/attr_unchecked_on_tuple_field.rs:4:13
+  |
+4 | struct Port(#[config(unchecked)] u16);
+  |             ^^^^^^^^^^^^^^^^^^^^
