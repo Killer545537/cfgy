@@ -1,0 +1,11 @@
+error: duplicate variant name `readonly`
+ --> tests/ui/fail/attr_enum_duplicate_variant.rs:8:5
+  |
+8 |     Readonly,
+  |     ^^^^^^^^
+
+error: first used here
+ --> tests/ui/fail/attr_enum_duplicate_variant.rs:7:5
+  |
+7 |     ReadOnly,
+  |     ^^^^^^^^

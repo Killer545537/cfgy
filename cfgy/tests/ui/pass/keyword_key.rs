@@ -2,14 +2,14 @@ use cfgy::FromConfig;
 
 // Two ways to read the keyword key `type`.
 #[derive(FromConfig, Debug, PartialEq)]
-#[config(path = "../../../../cfgy/tests/ui/pass/keyword_key.toml")]
+#[config(path = "fixtures/pass/keyword_key.toml")]
 struct Renamed {
     #[config(rename = "type")]
     kind: String,
 }
 
 #[derive(FromConfig, Debug, PartialEq)]
-#[config(path = "../../../../cfgy/tests/ui/pass/keyword_key.toml")]
+#[config(path = "fixtures/pass/keyword_key.toml")]
 struct RawIdent {
     r#type: String,
 }

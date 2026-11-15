@@ -6,11 +6,11 @@
 //! compile the cases inside this crate: it generates a project at `<target-dir>/tests/trybuild/cfgy/` and builds
 //! each case as a bin of that project, so `CARGO_MANIFEST_DIR` is that generated directory, not `cfgy/`.
 //!
-//! Cases therefore reference their fixture files relative to it, climbing out of the target dir and back into this
-//! crate: `path = "../../../../cfgy/tests/ui/<dir>/<file>"`. This holds for the default target dir
-//! (`<workspace>/target`), which is what local runs and CI use. A custom `CARGO_TARGET_DIR` breaks the checked
-//! cases (they fail with "config file ... not found"), because a path literal cannot be made relative to anything
-//! else without a library change.
+//! Before running the cases, this test copies every `*.toml`, `*.json` and `*.yaml` under `tests/ui/` into
+//! `<target-dir>/tests/trybuild/cfgy/fixtures/`, keeping its subdirectory, and cases reference them as
+//! `path = "fixtures/<dir>/<file>"`. `<target-dir>` is the parent of `CARGO_TARGET_TMPDIR`, so this works with a
+//! custom `CARGO_TARGET_DIR` too. trybuild never cleans its project directory, so the copies survive until the
+//! cases are built.
 //!
 //! Runtime reads in pass cases use `include_str!`, which is relative to the case's source file and so unaffected.
 //!
@@ -19,21 +19,66 @@
 //! trybuild builds the cases with the features this test was built with, so the default run only has TOML.
 //!
 //! - `fail-json/`, `fail-yaml/`: need their format feature; with it off the file would fail for a different reason.
-//! - `fail-unix/`: the missing-file message embeds the OS error text (`No such file or directory (os error 2)`),
-//!   which reads differently on Windows.
+//! - `fail-check/`, `fail-check-json/` (also needs `json`): the compile-time check's const-evaluation errors, whose rendering (notes and
+//!   source snippets from `core`) differs between rustc channels and versions. They are blessed on stable and run
+//!   only with a stable rustc; the derive's unit tests and core's parity tests carry the coverage elsewhere.
+
+use std::path::Path;
+use std::process::Command;
+use std::{env, fs, io};
+
+/// Extensions of the config files copied into the trybuild project.
+const FIXTURE_EXTENSIONS: [&str; 3] = ["toml", "json", "yaml"];
+
+/// Copies every fixture file under `src` into `dst`, preserving relative subdirectories.
+fn copy_fixtures(src: &Path, dst: &Path) -> io::Result<()> {
+    for entry in fs::read_dir(src)? {
+        let path = entry?.path();
+        let target = dst.join(path.file_name().unwrap_or_default());
+        if path.is_dir() {
+            copy_fixtures(&path, &target)?;
+        } else if path.extension().and_then(|ext| ext.to_str()).is_some_and(|ext| FIXTURE_EXTENSIONS.contains(&ext)) {
+            fs::create_dir_all(dst)?;
+            fs::copy(&path, &target)?;
+        }
+    }
+    Ok(())
+}
+
+/// Whether the `rustc` that builds the cases is a stable release: the one `RUSTC` names, else `rustc` on the path,
+/// which rustup resolves to the toolchain running this test. `false` if it cannot be asked.
+fn stable_rustc() -> bool {
+    let rustc = env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+    Command::new(rustc).arg("--version").output().is_ok_and(|output| {
+        let version = String::from_utf8_lossy(&output.stdout);
+        output.status.success() && !["nightly", "beta", "dev"].iter().any(|channel| version.contains(channel))
+    })
+}
 
 #[test]
 fn ui() {
+    let target_dir = Path::new(env!("CARGO_TARGET_TMPDIR")).parent().expect("CARGO_TARGET_TMPDIR has a parent");
+    let fixtures = target_dir.join("tests/trybuild/cfgy/fixtures");
+    // Start clean: a fixture deleted from the source tree must not linger, or `file_missing` would find it.
+    if let Err(error) = fs::remove_dir_all(&fixtures) {
+        assert_eq!(error.kind(), io::ErrorKind::NotFound, "clear old ui fixtures: {error}");
+    }
+    copy_fixtures(&Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/ui"), &fixtures)
+        .expect("copy ui fixtures into the trybuild project");
+
     let t = trybuild::TestCases::new();
     t.pass("tests/ui/pass/*.rs");
     t.compile_fail("tests/ui/fail/*.rs");
-    if cfg!(unix) {
-        t.compile_fail("tests/ui/fail-unix/*.rs");
-    }
     if cfg!(feature = "json") {
         t.compile_fail("tests/ui/fail-json/*.rs");
     }
     if cfg!(feature = "yaml") {
         t.compile_fail("tests/ui/fail-yaml/*.rs");
+    }
+    if stable_rustc() {
+        t.compile_fail("tests/ui/fail-check/*.rs");
+        if cfg!(feature = "json") {
+            t.compile_fail("tests/ui/fail-check-json/*.rs");
+        }
     }
 }

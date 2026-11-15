@@ -1,0 +1,17 @@
+error[E0080]: evaluation panicked: fixtures/fail-check/file_vec_out_of_range.toml:1:14: `levels[1]`: 300 is out of range for u8
+ --> tests/ui/fail-check/file_vec_out_of_range.rs:5:17
+  |
+4 | #[derive(FromConfig)]
+  |          ---------- in this derive macro expansion
+5 | #[config(path = "fixtures/fail-check/file_vec_out_of_range.toml")]
+  |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `_::_` failed inside this call
+  |
+note: inside `cfgy::__private::check_node`
+ --> $RUST/core/src/panic.rs
+  |
+  = note: the failure occurred here
+  |
+ ::: $WORKSPACE/cfgy-core/src/check.rs
+  |
+  |     panic!("{}", message.as_str())
+  |     ------------------------------ in this macro invocation

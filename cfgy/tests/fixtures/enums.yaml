@@ -1,0 +1,26 @@
+# Externally tagged variants use YAML tags, as serde_yaml writes them.
+mode: !Off
+port: !Port 8080
+pair: !Pair [a, 1]
+speed: very-fast
+fallback: [b, 2]
+names:
+  - api
+  - 443
+  - host: db
+serve: !Serve
+  host: example.com
+  tls: true
+backends:
+  - type: Off
+  - type: Serve
+    host: 10.0.0.1
+    port: 9000
+  - type: Wrapped
+    host: 10.0.0.2
+probe:
+  t: Serve
+  c:
+    host: probe.local
+level:
+  t: Level

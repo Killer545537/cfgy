@@ -2,7 +2,7 @@ use cfgy::FromConfig;
 
 // Only `name` is in the file: `description` is optional and `timeout_secs` has a default.
 #[derive(FromConfig, Debug, PartialEq)]
-#[config(path = "../../../../cfgy/tests/ui/pass/partial.toml")]
+#[config(path = "fixtures/pass/partial.toml")]
 struct Partial {
     name: String,
     description: Option<String>,

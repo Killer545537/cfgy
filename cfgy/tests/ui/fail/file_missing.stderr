@@ -1,0 +1,5 @@
+error: config file `fixtures/fail/file_missing.toml` does not exist
+ --> tests/ui/fail/file_missing.rs:4:17
+  |
+4 | #[config(path = "fixtures/fail/file_missing.toml")]
+  |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

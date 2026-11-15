@@ -1,0 +1,14 @@
+listeners = ["disabled", { local_port = 8080 }, { remote_host = { host = "example.com" } }]
+probes = [{ t = "NO_PROBE" }, { t = "TCP_PORT", c = 9000 }, { t = "HTTP_GET", c = { path = "/health" } }]
+fallbacks = [443, { host = "db" }]
+
+[[backends]]
+type = "offline"
+
+[[backends]]
+type = "static-server"
+host = "10.0.0.1"
+
+[[backends]]
+type = "dynamic-server"
+discovery_url = "http://consul"

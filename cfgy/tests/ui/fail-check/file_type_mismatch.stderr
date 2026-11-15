@@ -1,0 +1,17 @@
+error[E0080]: evaluation panicked: fixtures/fail-check/file_type_mismatch.toml:1:8: `port`: expected u16, found string
+ --> tests/ui/fail-check/file_type_mismatch.rs:4:17
+  |
+3 | #[derive(FromConfig)]
+  |          ---------- in this derive macro expansion
+4 | #[config(path = "fixtures/fail-check/file_type_mismatch.toml")]
+  |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `_::_` failed inside this call
+  |
+note: inside `cfgy::__private::check_node`
+ --> $RUST/core/src/panic.rs
+  |
+  = note: the failure occurred here
+  |
+ ::: $WORKSPACE/cfgy-core/src/check.rs
+  |
+  |     panic!("{}", message.as_str())
+  |     ------------------------------ in this macro invocation

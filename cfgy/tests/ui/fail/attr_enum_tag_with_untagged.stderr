@@ -1,0 +1,5 @@
+error: `untagged` cannot be combined with `tag`
+ --> tests/ui/fail/attr_enum_tag_with_untagged.rs:4:24
+  |
+4 | #[config(tag = "type", untagged)]
+  |                        ^^^^^^^^
