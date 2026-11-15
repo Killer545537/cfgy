@@ -1,0 +1,5 @@
+error: unknown `rename_all` rule "Title Case", expected one of "lowercase", "UPPERCASE", "PascalCase", "camelCase", "snake_case", "SCREAMING_SNAKE_CASE", "kebab-case", "SCREAMING-KEBAB-CASE"
+ --> tests/ui/fail/attr_enum_unknown_rename_all.rs:4:23
+  |
+4 | #[config(rename_all = "Title Case")]
+  |                       ^^^^^^^^^^^^
