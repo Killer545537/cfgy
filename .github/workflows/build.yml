@@ -14,34 +14,45 @@ env:
 
 jobs:
   build:
-    name: build (${{ matrix.os }} / ${{ matrix.toolchain }})
+    name: build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        toolchain: [stable]
-        include:
-          # MSRV must match `rust-version` in the root Cargo.toml.
-          - os: ubuntu-latest
-            toolchain: "1.85"
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install Rust ${{ matrix.toolchain }}
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ matrix.toolchain }}
+      - name: Install Rust
+        run: rustup toolchain install # reads rust-toolchain.toml
 
       - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.toolchain }}
 
-      # MSRV covers the libraries only: dev-dependencies such as trybuild (rustc 1.88) may need a newer toolchain.
       - name: Build
-        run: cargo build --workspace --all-features ${{ matrix.toolchain == 'stable' && '--all-targets' || '' }}
+        run: cargo build --workspace --all-features --all-targets
 
       # Catches errors that only surface without the default feature set,
       # which matters because each format is feature-gated.
+      - name: Check with no default features
+        run: cargo check --workspace --no-default-features
+
+  msrv:
+    name: build (msrv)
+    runs-on: ubuntu-latest
+    # Must match `rust-version` in the root Cargo.toml. Overrides rust-toolchain.toml.
+    env:
+      RUSTUP_TOOLCHAIN: "1.85"
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust 1.85
+        run: rustup toolchain install 1.85 --profile minimal
+
+      - uses: Swatinem/rust-cache@v2
+
+      # MSRV covers the libraries only: dev-dependencies such as trybuild (rustc 1.88) may need a newer toolchain.
+      - name: Build
+        run: cargo build --workspace --all-features
+
       - name: Check with no default features
         run: cargo check --workspace --no-default-features

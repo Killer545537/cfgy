@@ -1,0 +1,12 @@
+# Git hooks for this repo (config-based hooks, git >= 2.54). Enable once per clone:
+#   git config set include.path ../.githooks.gitconfig
+# Hooks for the same event run in the order listed. Skip them for one commit with --no-verify.
+# ponytail: checks the working tree, not just the staged diff; stash unstaged changes if that matters.
+
+[hook "cfgy-fmt"]
+	event = pre-commit
+	command = cargo fmt --all --check
+
+[hook "cfgy-clippy"]
+	event = pre-commit
+	command = cargo clippy --workspace --all-features --all-targets --quiet -- -D warnings

@@ -282,15 +282,21 @@ settings.validate()?;
 cargo build --workspace --all-features --all-targets          # build
 cargo nextest run --workspace --all-features                  # tests
 cargo test --workspace --all-features --doc                   # doctests
-cargo +stable test -p cfgy --test ui                          # trybuild UI tests
+cargo test -p cfgy --test ui                                  # trybuild UI tests
 cargo clippy --workspace --all-features --all-targets -- -D warnings
 cargo fmt --all --check
 cargo deny check                                              # licenses and advisories
 ```
 
+To run `cargo fmt --check` and clippy before every commit (git 2.54 or later):
+
+```sh
+git config set include.path ../.githooks.gitconfig
+```
+
 The UI cases for the compile-time check's const-evaluation errors are blessed
-on stable and run only with a stable rustc, since their rendering differs
-between versions.
+on the toolchain pinned in `rust-toolchain.toml` and run only with a stable
+rustc, since their rendering differs between versions.
 
 The full design, including the rationale behind the value IR and the plan/codegen
 split, lives in [`.docs/DESIGN.md`](.docs/DESIGN.md).

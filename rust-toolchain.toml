@@ -1,0 +1,5 @@
+# The toolchain for development and CI. The trybuild snapshots are blessed on it,
+# so bump it and re-bless (`TRYBUILD=overwrite`) together. MSRV is `rust-version`.
+[toolchain]
+channel = "1.100.0"
+components = ["clippy", "rustfmt"]
