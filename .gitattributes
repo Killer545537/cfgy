@@ -1,0 +1,3 @@
+# Check text out with LF everywhere: snapshots and fixtures are compared byte for byte,
+# and Windows runners default to core.autocrlf=true.
+* text=auto eol=lf
