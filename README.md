@@ -288,6 +288,12 @@ cargo fmt --all --check
 cargo deny check                                              # licenses and advisories
 ```
 
+To run `cargo fmt --check` and clippy before every commit (git 2.54 or later):
+
+```sh
+git config set include.path ../.githooks.gitconfig
+```
+
 The UI cases for the compile-time check's const-evaluation errors are blessed
 on the toolchain pinned in `rust-toolchain.toml` and run only with a stable
 rustc, since their rendering differs between versions.
